@@ -70,4 +70,4 @@ class TestCoreCertification:
         assert "internal_pipeline" in result.metadata
 
     def test_version_is_certified_release(self):
-        assert __version__ == "8.12.0"
+        assert __version__ == "9.4.0"

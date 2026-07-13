@@ -38,12 +38,12 @@ EXPECTED_MODULES = (
 
 class TestProjectStructure:
     def test_version(self):
-        assert __version__ == "8.12.0"
+        assert __version__ == "9.4.0"
 
     def test_settings_default(self):
         settings = MotorSettings.default()
         assert settings.service_name == "zovrake-motor"
-        assert settings.service_version == "8.12.0"
+        assert settings.service_version == "9.4.0"
 
     def test_all_modules_exist(self):
         for module_name in EXPECTED_MODULES:

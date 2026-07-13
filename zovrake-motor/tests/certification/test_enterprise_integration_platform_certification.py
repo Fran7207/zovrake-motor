@@ -47,7 +47,7 @@ class TestEnterpriseIntegrationPlatformCertification:
             assert "8.12" in path.read_text(encoding="utf-8")
 
     def test_version_reflects_platform_release(self):
-        assert __version__ == "8.12.0"
+        assert __version__ == "9.4.0"
 
     def test_minimum_platform_check_count(self):
         checks = EnterpriseIntegrationPlatformCertificationChecker().run()

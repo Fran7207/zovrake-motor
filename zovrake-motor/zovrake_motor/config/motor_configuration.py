@@ -15,6 +15,7 @@ from zovrake_motor.config.categories import (
     FutureSettings,
     GeneralSettings,
     EnterpriseIntegrationSettings,
+    IntegrationApiSettings,
     IntelligentAnalysisSettings,
     PathsSettings,
     PerformanceSettings,
@@ -51,6 +52,9 @@ class MotorConfiguration:
     enterprise_integration: EnterpriseIntegrationSettings = field(
         default_factory=EnterpriseIntegrationSettings.default,
     )
+    integration_api: IntegrationApiSettings = field(
+        default_factory=IntegrationApiSettings.default,
+    )
     future: FutureSettings = field(default_factory=FutureSettings.default)
 
     def get_category(self, category: ConfigCategory) -> Any:
@@ -69,6 +73,7 @@ class MotorConfiguration:
             ConfigCategory.COMPARATIVE_TABLES: self.comparative_tables,
             ConfigCategory.INTELLIGENT_ANALYSIS: self.intelligent_analysis,
             ConfigCategory.ENTERPRISE_INTEGRATION: self.enterprise_integration,
+            ConfigCategory.INTEGRATION_API: self.integration_api,
             ConfigCategory.FUTURE: self.future,
         }
         return mapping[category]
@@ -844,6 +849,18 @@ class MotorConfiguration:
                     "enabled": self.enterprise_integration.integration_configuration_manager.enabled,
                     "prepared": self.enterprise_integration.integration_configuration_manager.prepared,
                 },
+            },
+            "integration_api": {
+                "enabled": self.integration_api.enabled,
+                "prepared": self.integration_api.prepared,
+                "public_contract_version": self.integration_api.public_contract_version,
+                "http_transport_prepared": self.integration_api.http_transport_prepared,
+                "authentication_prepared": self.integration_api.authentication_prepared,
+                "authorization_prepared": self.integration_api.authorization_prepared,
+                "cors_prepared": self.integration_api.cors_prepared,
+                "health_endpoint_prepared": self.integration_api.health_endpoint_prepared,
+                "max_documents_per_request": self.integration_api.max_documents_per_request,
+                "max_concurrent_analyses": self.integration_api.max_concurrent_analyses,
             },
             "classification": {
                 "enabled": self.classification.enabled,

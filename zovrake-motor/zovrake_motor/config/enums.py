@@ -29,4 +29,5 @@ class ConfigCategory(str, Enum):
     COMPARATIVE_TABLES = "comparative_tables"
     INTELLIGENT_ANALYSIS = "intelligent_analysis"
     ENTERPRISE_INTEGRATION = "enterprise_integration"
+    INTEGRATION_API = "integration_api"
     FUTURE = "future"

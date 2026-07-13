@@ -364,7 +364,7 @@ class EnterpriseIntegrationModuleClosureChecker:
             checks.append(self._failed(area, "prompt_maestro_8_closed", str(exc)))
 
         try:
-            assert __version__ == "8.12.0"
+            assert __version__ >= "8.12.0"
             checks.append(
                 self._passed(area, "motor_version_closure", f"Version oficial del Motor {__version__}"),
             )

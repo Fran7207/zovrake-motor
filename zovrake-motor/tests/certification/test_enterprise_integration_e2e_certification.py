@@ -45,7 +45,7 @@ class TestEnterpriseIntegrationE2ECertification:
             assert (ENTERPRISE_INTEGRATION_ROOT / filename).is_file()
 
     def test_version_reflects_e2e_release(self):
-        assert __version__ == "8.12.0"
+        assert __version__ == "9.4.0"
 
     def test_architectural_boundaries_include_full_flow(self):
         boundaries = governance_snapshot()["architectural_boundaries"]

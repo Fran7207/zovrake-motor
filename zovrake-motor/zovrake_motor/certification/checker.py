@@ -70,7 +70,15 @@ class CoreCertificationChecker:
         report.checks.extend(self._check_enterprise_integration_e2e())
         report.checks.extend(self._check_enterprise_integration_platform())
         report.checks.extend(self._check_enterprise_integration_closure())
+        report.checks.extend(self._check_integration_api_e2e())
         return report
+
+    def _check_integration_api_e2e(self) -> list[CertificationCheck]:
+        from zovrake_motor.certification.integration_api_e2e_checker import (
+            IntegrationApiE2ECertificationChecker,
+        )
+
+        return IntegrationApiE2ECertificationChecker().run()
 
     def _check_enterprise_integration_closure(self) -> list[CertificationCheck]:
         from zovrake_motor.certification.enterprise_integration_closure_checker import (

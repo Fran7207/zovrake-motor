@@ -51,7 +51,7 @@ class TestIntelligentAnalysisModuleClosure:
             assert (INTELLIGENT_ANALYSIS_ROOT / filename).is_file()
 
     def test_version_reflects_closure_release(self):
-        assert __version__ == "8.12.0"
+        assert __version__ == "9.4.0"
 
     def test_output_contract_metadata_complete(self):
         contract = closure_snapshot()["output_contract"]

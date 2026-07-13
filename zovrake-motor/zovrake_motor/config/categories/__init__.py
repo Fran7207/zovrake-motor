@@ -3,6 +3,7 @@
 from zovrake_motor.config.categories.behavior import BehaviorSettings
 from zovrake_motor.config.categories.classification import ClassificationSettings, ConceptAnalysisSettings, ConceptNormalizationSettings, EquivalenceDetectionSettings, MaterialClassificationSettings, ServiceClassificationSettings
 from zovrake_motor.config.categories.enterprise_integration import EnterpriseIntegrationSettings
+from zovrake_motor.config.categories.integration_api import IntegrationApiSettings
 from zovrake_motor.config.categories.intelligent_analysis import IntelligentAnalysisSettings
 from zovrake_motor.config.categories.comparative_tables import (
     ComparativeStructureEngineSettings,
@@ -39,6 +40,7 @@ __all__ = [
     "ServiceClassificationSettings",
     "CommunicationSettings",
     "EnterpriseIntegrationSettings",
+    "IntegrationApiSettings",
     "IntelligentAnalysisSettings",
     "DynamicColumnBuilderSettings",
     "ComparativeTablesSettings",

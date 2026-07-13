@@ -2,11 +2,12 @@
 Motor Inteligente de ZOVRAKE.
 
 Servicio Python independiente del ERP frontend.
-Implementación 8.9 — Performance Optimization & Scalability Framework (Prompt Maestro 8).
+Implementación 9.4 — Validación E2E ERP ↔ API ↔ Motor (Prompt Maestro 9).
 """
 
-__version__ = "8.12.0"
+__version__ = "9.4.0"
 
+from zovrake_motor.api import IntegrationApiService
 from zovrake_motor.certification import CoreCertificationChecker
 from zovrake_motor.classification import ClassificationService
 from zovrake_motor.communication import CommunicationService
@@ -34,6 +35,7 @@ __all__ = [
     "EnterpriseIntegrationService",
     "EventManager",
     "EventService",
+    "IntegrationApiService",
     "IntelligentAnalysisService",
     "MotorState",
     "MotorCoordinator",

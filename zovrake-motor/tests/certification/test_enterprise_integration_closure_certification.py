@@ -60,7 +60,7 @@ class TestEnterpriseIntegrationModuleClosureCertification:
             assert (ENTERPRISE_INTEGRATION_ROOT / filename).is_file()
 
     def test_version_reflects_closure_release(self):
-        assert __version__ == "8.12.0"
+        assert __version__ == "9.4.0"
 
     def test_integration_contract_metadata_complete(self):
         contract = closure_snapshot()["integration_contract"]

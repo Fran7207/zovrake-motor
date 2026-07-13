@@ -18,6 +18,7 @@ from zovrake_motor.config.categories import (
     FutureSettings,
     GeneralSettings,
     EnterpriseIntegrationSettings,
+    IntegrationApiSettings,
     IntelligentAnalysisSettings,
     PathsSettings,
     PerformanceSettings,
@@ -103,6 +104,9 @@ class ConfigurationProvider:
 
     def enterprise_integration(self) -> EnterpriseIntegrationSettings:
         return self._configuration.enterprise_integration
+
+    def integration_api(self) -> IntegrationApiSettings:
+        return self._configuration.integration_api
 
     def future(self) -> FutureSettings:
         return self._configuration.future

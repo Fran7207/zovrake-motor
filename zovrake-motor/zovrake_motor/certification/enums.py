@@ -30,6 +30,7 @@ class CertificationArea(str, Enum):
     ENTERPRISE_INTEGRATION_E2E = "enterprise_integration_e2e"
     ENTERPRISE_INTEGRATION_PLATFORM = "enterprise_integration_platform"
     ENTERPRISE_INTEGRATION_CLOSURE = "enterprise_integration_closure"
+    INTEGRATION_API_E2E = "integration_api_e2e"
 
 
 class CertificationStatus(str, Enum):

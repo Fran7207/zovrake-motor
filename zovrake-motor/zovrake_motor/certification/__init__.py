@@ -88,4 +88,10 @@ def __getattr__(name: str):
         )
 
         return EnterpriseIntegrationModuleClosureChecker
+    if name == "IntegrationApiE2ECertificationChecker":
+        from zovrake_motor.certification.integration_api_e2e_checker import (
+            IntegrationApiE2ECertificationChecker,
+        )
+
+        return IntegrationApiE2ECertificationChecker
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -12,7 +12,7 @@ class GeneralSettings:
     """Identidad y parámetros generales del Motor."""
 
     service_name: str = "zovrake-motor"
-    service_version: str = "8.12.0"
+    service_version: str = "9.4.0"
     environment: MotorEnvironment = MotorEnvironment.DEVELOPMENT
     extra: dict[str, str] = field(default_factory=dict)
 

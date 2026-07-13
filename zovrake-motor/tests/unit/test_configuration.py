@@ -32,7 +32,7 @@ class TestConfigurationProvider:
         snapshot = provider.snapshot()
 
         assert provider.service_name() == "zovrake-motor"
-        assert provider.service_version() == "8.12.0"
+        assert provider.service_version() == "9.4.0"
         assert provider.environment() == MotorEnvironment.DEVELOPMENT
         assert "general" in snapshot
         assert "paths" in snapshot
@@ -57,7 +57,7 @@ class TestConfigurationProvider:
     def test_motor_settings_alias(self):
         settings = MotorSettings.default()
         assert settings.service_name == "zovrake-motor"
-        assert settings.service_version == "8.12.0"
+        assert settings.service_version == "9.4.0"
 
 
     def test_comprehension_category_available(self):

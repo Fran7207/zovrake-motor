@@ -36,7 +36,7 @@ class TestEnterpriseIntegrationModuleClosure:
         assert len(frozen_component_names()) == 17
 
     def test_version_reflects_closure_release(self):
-        assert __version__ == "8.12.0"
+        assert __version__ == "9.4.0"
 
     def test_official_flow_declared(self):
         flow = closure_snapshot()["official_integration_flow"]
