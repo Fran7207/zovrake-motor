@@ -128,6 +128,45 @@ class TestSecurityValidationAuditFramework:
         assert second.success is False
         assert second.analysis_status == "error_validacion"
 
+    def test_status_and_result_queries_are_idempotent(self):
+        """El ERP hace polling legítimo; consultas repetidas no deben rechazarse."""
+        from zovrake_motor.enterprise_integration.ecg.contracts.erp_requests import (
+            EvidenceCenterResultQuery,
+            EvidenceCenterStatusQuery,
+        )
+
+        service = EnterpriseIntegrationService()
+        service.initialize()
+        process_id = uuid4()
+        request = _analysis_request(process_id)
+
+        start = service.submit_evidence_center_analysis(request)
+        assert start.success is True
+        service.process_async_queue_pending()
+
+        status_query = EvidenceCenterStatusQuery(
+            process_id=process_id,
+            project_id=request.project_id,
+            quotation_id=request.quotation_id,
+        )
+        result_query = EvidenceCenterResultQuery(
+            process_id=process_id,
+            project_id=request.project_id,
+            quotation_id=request.quotation_id,
+        )
+
+        first_status = service.query_evidence_center_status(status_query)
+        second_status = service.query_evidence_center_status(status_query)
+        assert first_status.success is True
+        assert second_status.success is True
+        assert second_status.analysis_status != "error_validacion"
+
+        first_result = service.query_evidence_center_result(result_query)
+        second_result = service.query_evidence_center_result(result_query)
+        assert first_result.success is True
+        assert second_result.success is True
+        assert second_result.analysis_status != "error_validacion"
+
     def test_events_registered_for_validation(self):
         event_manager = EventManager()
         service = EnterpriseIntegrationService(event_manager=event_manager)

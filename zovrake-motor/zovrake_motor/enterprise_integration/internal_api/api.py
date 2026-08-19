@@ -94,6 +94,11 @@ class InternalIntegrationApi:
         self._context.initialize()
         self._initialized = True
 
+    def bind_result_registry(self, result_registry) -> None:
+        """Conecta el registro de resultados ejecutados por ``motor_runtime``."""
+        self._analysis_result_service.bind_result_registry(result_registry)
+        self._analysis_status_service.bind_result_registry(result_registry)
+
     def is_ready(self) -> bool:
         return self._initialized and self._context.is_initialized
 

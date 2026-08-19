@@ -153,6 +153,8 @@ class EnterpriseIntegrationService(
         return self._initialized
 
     def initialize(self) -> None:
+        if self._initialized:
+            return
         self._enterprise_integration_coordinator = self._registry.register_defaults(
             integration=self._integration,
         )
@@ -211,6 +213,28 @@ class EnterpriseIntegrationService(
             settings=self._integration.enterprise_integration_settings(),
         )
         self._initialized = True
+
+    def bind_motor_execution(
+        self,
+        *,
+        invocation_handler,
+        result_registry,
+    ) -> None:
+        """
+        Inyecta la ejecución real del Motor (``motor_runtime``) sin romper el desacoplamiento PM8.
+
+        El handler vive fuera de ``enterprise_integration`` y se enlaza al gateway unitario.
+        """
+        self.initialize()
+        pio_component = self._registry.get("pipeline_integration_orchestrator")
+        if isinstance(pio_component, PipelineIntegrationOrchestratorComponent):
+            pio_component.orchestrator.motor_gateway.bind_invocation_handler(invocation_handler)
+
+        coordinator = self._enterprise_integration_coordinator
+        if coordinator is not None:
+            gateway = coordinator.internal_api_gateway
+            if gateway is not None and gateway.internal_api is not None:
+                gateway.internal_api.bind_result_registry(result_registry)
 
     def prepare(self, request: EnterpriseIntegrationRequest) -> EnterpriseIntegrationResult:
         settings = self._integration.enterprise_integration_settings()

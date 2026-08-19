@@ -22,23 +22,55 @@ class ErpRequestTransformer:
     Nunca produce estructuras improvisadas.
     """
 
-    def to_start_analysis(self, request: EvidenceCenterAnalysisRequest) -> StartAnalysisRequest:
-        document_ids = tuple(doc.document_id for doc in request.evidence_documents)
-        return StartAnalysisRequest(
-            process_id=request.process_id,
-            codigo_req=request.requirement.codigo_req,
-            contract_version=ContractVersionRegistry.ACTIVE_VERSION,
-            document_ids=document_ids,
-            metadata={
-                "source": "evidence_center",
-                "project_id": request.project_id,
-                "quotation_id": request.quotation_id,
-                "analysis_metadata": request.analysis_metadata,
-                "evidence_center_contract": request.contract_version,
-                "requirement_description": request.requirement.description,
-                "source_data_preserved": True,
-            },
-        )
+def to_start_analysis(
+    self,
+    request: EvidenceCenterAnalysisRequest,
+) -> StartAnalysisRequest:
+    """
+    Transforma una solicitud del Centro de Evidencias al contrato
+    oficial de la API Interna conservando las referencias documentales.
+
+    Esta capa no interpreta ni procesa el contenido de los documentos.
+    Únicamente conserva la información necesaria para que el Motor
+    pueda resolver y procesar posteriormente el documento real.
+    """
+    document_ids = tuple(
+        doc.document_id
+        for doc in request.evidence_documents
+    )
+
+    document_references = tuple(
+        {
+            "document_id": doc.document_id,
+            "document_label": doc.document_label,
+            "content_type": str(
+                (doc.metadata or {}).get("content_type", "")
+            ),
+            "metadata": dict(doc.metadata or {}),
+        }
+        for doc in request.evidence_documents
+    )
+
+    return StartAnalysisRequest(
+        process_id=request.process_id,
+        codigo_req=request.requirement.codigo_req,
+        contract_version=ContractVersionRegistry.ACTIVE_VERSION,
+        document_ids=document_ids,
+        document_references=document_references,
+        metadata={
+            "source": "evidence_center",
+            "project_id": request.project_id,
+            "quotation_id": request.quotation_id,
+            "analysis_metadata": request.analysis_metadata,
+            "evidence_center_contract": request.contract_version,
+            "requirement_description": request.requirement.description,
+            "requirement_metadata": dict(
+                request.requirement.metadata or {}
+            ),
+            "source_data_preserved": True,
+            "document_count": len(document_references),
+        },
+    )
 
     def to_status_query(self, request: EvidenceCenterStatusQuery) -> AnalysisStatusQueryRequest:
         return AnalysisStatusQueryRequest(

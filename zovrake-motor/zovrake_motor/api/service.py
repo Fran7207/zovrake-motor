@@ -70,6 +70,8 @@ class IntegrationApiService:
         return self.MODULE_NAME
 
     def initialize(self) -> None:
+        if self._initialized:
+            return
         self._enterprise_service.initialize()
         self._initialized = True
 

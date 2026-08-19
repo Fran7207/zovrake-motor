@@ -36,11 +36,16 @@ class AnalysisStatusService(AnalysisStatusServicePort):
         validator: StructuralValidator | None = None,
         error_service: ErrorResponseService | None = None,
         event_recorder: InternalApiEventRecorder | None = None,
+        result_registry=None,
     ) -> None:
         self._context = context
         self._validator = validator or StructuralValidator()
         self._error_service = error_service or ErrorResponseService()
         self._event_recorder = event_recorder or InternalApiEventRecorder(context)
+        self._result_registry = result_registry
+
+    def bind_result_registry(self, result_registry) -> None:
+        self._result_registry = result_registry
 
     def query_status(
         self,
@@ -64,16 +69,36 @@ class AnalysisStatusService(AnalysisStatusServicePort):
         if process_record is not None:
             motor_state = process_record.current_state.value
 
-        response = AnalysisStatusResponse(
-            process_id=request.process_id,
-            success=True,
-            message="Estado consultado — sin ejecución de análisis en esta etapa",
-            contract_version=request.contract_version,
-            processing_status=AnalysisProcessingStatus.NOT_EXECUTED,
-            motor_state=motor_state,
-            executed=False,
-            metadata={"codigo_req": request.codigo_req},
-        )
+        stored = None
+        if self._result_registry is not None:
+            stored = self._result_registry.get(request.process_id)
+
+        if stored is not None and stored.executed:
+            response = AnalysisStatusResponse(
+                process_id=request.process_id,
+                success=True,
+                message="Análisis ejecutado — resultado disponible",
+                contract_version=request.contract_version,
+                processing_status=AnalysisProcessingStatus.ACCEPTED,
+                motor_state=motor_state,
+                executed=True,
+                metadata={
+                    "codigo_req": stored.codigo_req or request.codigo_req,
+                    "executed": True,
+                    "catalog_id": stored.catalog_id,
+                },
+            )
+        else:
+            response = AnalysisStatusResponse(
+                process_id=request.process_id,
+                success=True,
+                message="Estado consultado — sin ejecución de análisis en esta etapa",
+                contract_version=request.contract_version,
+                processing_status=AnalysisProcessingStatus.NOT_EXECUTED,
+                motor_state=motor_state,
+                executed=False,
+                metadata={"codigo_req": request.codigo_req},
+            )
         self._event_recorder.record_response_prepared(
             request.process_id,
             operation="query_status",

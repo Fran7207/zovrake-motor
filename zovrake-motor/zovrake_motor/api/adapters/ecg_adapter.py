@@ -71,7 +71,7 @@ class EcgGatewayAdapter:
             codigo_req="",
             project_id=query.project_id,
             quotation_id=query.quotation_id,
-            default_stage=IntegrationApiLifecycleStage.PROCESSING,
+            default_stage=self._lifecycle_stage_from_queue(query.analysis_id),
         )
 
     def query_result(self, query: PublicResultQuery) -> PublicAnalysisResponse:
@@ -92,6 +92,26 @@ class EcgGatewayAdapter:
             quotation_id=query.quotation_id,
             default_stage=IntegrationApiLifecycleStage.RESULT_GENERATED,
         )
+
+    def _lifecycle_stage_from_queue(self, analysis_id) -> IntegrationApiLifecycleStage:
+        """Deriva la etapa pública del ciclo de vida desde el estado real de la cola APQM."""
+        from zovrake_motor.enterprise_integration.apqm.enums import ApqmProcessingStage
+
+        apqm = self._service.async_processing_queue_manager
+        if apqm is None or not apqm.is_ready():
+            return IntegrationApiLifecycleStage.PROCESSING
+
+        item = apqm.manager.get_item_by_process(analysis_id)
+        if item is None:
+            return IntegrationApiLifecycleStage.PROCESSING
+
+        if item.stage == ApqmProcessingStage.PROCESSING_COMPLETED:
+            return IntegrationApiLifecycleStage.RESULT_GENERATED
+        if item.stage == ApqmProcessingStage.CONTROLLED_ERROR:
+            return IntegrationApiLifecycleStage.FAILED
+        if item.stage == ApqmProcessingStage.PROCESSING_CANCELLED:
+            return IntegrationApiLifecycleStage.CANCELLED
+        return IntegrationApiLifecycleStage.PROCESSING
 
     @staticmethod
     def _to_evidence_request(request: PublicAnalysisRequest) -> EvidenceCenterAnalysisRequest:
@@ -149,10 +169,16 @@ class EcgGatewayAdapter:
         analysis_result = getattr(delivery, "analysis_result", None)
         if analysis_result is not None:
             payload = analysis_result.to_dict() if hasattr(analysis_result, "to_dict") else {}
+            metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+            comparative_ready = bool(
+                metadata.get("comparative_tables")
+                or payload.get("executed")
+                or payload.get("comparative_tables")
+            )
             result = StructuredAnalysisResultPayload(
                 catalog_id=str(payload.get("catalog_id", "")),
                 result_reference_id=str(payload.get("result_reference_id", "")),
-                comparative_tables_ready=bool(payload.get("comparative_tables") or payload),
+                comparative_tables_ready=comparative_ready,
                 payload=payload if isinstance(payload, dict) else {},
             )
 

@@ -330,9 +330,22 @@ class PipelineIntegrationOrchestrator:
                     process_id=request.process_id,
                     codigo_req=request.codigo_req,
                     operation=PipelineOrchestrationOperation.START_ANALYSIS.value,
+                    document_ids=tuple(request.document_ids),
+                    metadata=dict(request.metadata),
                 )
                 ctx.motor_invocation_prepared = invocation["prepared"]
-                ctx.motor_executed = invocation["invoked"]
+                ctx.motor_executed = bool(invocation.get("invoked") or invocation.get("executed"))
+                ctx.metadata["motor_invocation"] = {
+                    key: invocation[key]
+                    for key in (
+                        "invoked",
+                        "executed",
+                        "catalog_id",
+                        "message",
+                        "documents_processed",
+                    )
+                    if key in invocation
+                }
             if phase == IntegrationPipelinePhase.RESULTADO_GENERADO:
                 api_response = internal_api.start_analysis(request)
                 return api_response
@@ -354,16 +367,22 @@ class PipelineIntegrationOrchestrator:
                 process_id=request.process_id,
             )
 
+        motor_executed = bool(context.motor_executed)
         return StartAnalysisResponse(
             process_id=api_response.process_id,
             success=api_response.success,
-            message=api_response.message,
+            message=(
+                "Análisis documental ejecutado por el Motor Inteligente"
+                if motor_executed
+                else api_response.message
+            ),
             contract_version=api_response.contract_version,
             processing_status=api_response.processing_status,
-            executed=False,
+            executed=motor_executed,
             metadata={
                 **api_response.metadata,
                 "pipeline_orchestration": pipeline_result.to_dict(),
+                "motor_executed": motor_executed,
             },
         )
 
@@ -417,10 +436,11 @@ class PipelineIntegrationOrchestrator:
             contract_version=api_response.contract_version,
             processing_status=api_response.processing_status,
             motor_state=api_response.motor_state,
-            executed=False,
+            executed=bool(api_response.executed),
             metadata={
                 **api_response.metadata,
                 "pipeline_orchestration": pipeline_result.to_dict(),
+                "motor_executed": bool(api_response.executed),
             },
         )
 
@@ -467,6 +487,10 @@ class PipelineIntegrationOrchestrator:
                 process_id=request.process_id,
             )
 
+        result_executed = bool(
+            api_response.executed
+            or (api_response.result is not None and api_response.result.executed)
+        )
         return AnalysisResultResponse(
             process_id=api_response.process_id,
             success=api_response.success,
@@ -474,10 +498,11 @@ class PipelineIntegrationOrchestrator:
             contract_version=api_response.contract_version,
             processing_status=api_response.processing_status,
             result=api_response.result,
-            executed=False,
+            executed=result_executed,
             metadata={
                 **api_response.metadata,
                 "pipeline_orchestration": pipeline_result.to_dict(),
+                "motor_executed": result_executed,
             },
         )
 

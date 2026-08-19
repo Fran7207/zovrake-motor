@@ -12,10 +12,13 @@ from zovrake_motor.enterprise_integration.internal_api.enums import InternalApiO
 
 @dataclass(frozen=True)
 class StartAnalysisRequest(InternalApiRequestBase):
-    """Contrato para iniciar análisis — sin ejecución en 8.2."""
+    """Contrato para iniciar un análisis documental real."""
 
     operation: InternalApiOperation = InternalApiOperation.START_ANALYSIS
     document_ids: tuple[str, ...] = field(default_factory=tuple)
+    document_references: tuple[dict[str, Any], ...] = field(
+        default_factory=tuple
+    )
     analysis_scope: str = "full"
 
     def to_dict(self) -> dict[str, Any]:
@@ -23,6 +26,7 @@ class StartAnalysisRequest(InternalApiRequestBase):
             **self.base_dict(),
             "operation": self.operation.value,
             "document_ids": list(self.document_ids),
+            "document_references": list(self.document_references),
             "analysis_scope": self.analysis_scope,
         }
 

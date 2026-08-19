@@ -55,7 +55,25 @@ class ItemsTransformer(ItemsTransformerPort):
         section_ref = source_reference(traceability.extraction_reference_id, self.section_type)
 
         for index, table in enumerate(extraction_result.tables):
-            for row_index, row in enumerate(table.rows):
+            rows = list(table.rows)
+            start = 0
+            if rows:
+                header_text = " ".join(str(cell) for cell in rows[0]).lower()
+                header_markers = (
+                    "descripcion",
+                    "descripción",
+                    "item",
+                    "ítem",
+                    "cantidad",
+                    "precio",
+                    "unidad",
+                    "total",
+                    "concepto",
+                )
+                hits = sum(1 for marker in header_markers if marker in header_text)
+                if hits >= 2:
+                    start = 1
+            for row_index, row in enumerate(rows[start:]):
                 if not row:
                     continue
                 description = row[0] if len(row) > 0 else ""

@@ -23,6 +23,13 @@ class RequestIntegrityValidator:
         "traceability",
     })
 
+    # Consultas idempotentes ERP ↔ Motor: el ERP hace polling legítimo.
+    # La detección de duplicados aplica solo a operaciones de mutación.
+    _IDEMPOTENT_OPERATIONS = frozenset({
+        "query_analysis_status",
+        "query_analysis_result",
+    })
+
     def __init__(self) -> None:
         self._seen_process_operations: set[tuple[str, str]] = set()
 
@@ -35,7 +42,8 @@ class RequestIntegrityValidator:
     ) -> tuple[ValidationIssue, ...]:
         issues: list[ValidationIssue] = []
         issues.extend(self._check_completeness(payload))
-        issues.extend(self._check_duplicate(process_id, operation))
+        if operation not in self._IDEMPOTENT_OPERATIONS:
+            issues.extend(self._check_duplicate(process_id, operation))
         issues.extend(self._check_payload_structure(payload))
         return tuple(issues)
 

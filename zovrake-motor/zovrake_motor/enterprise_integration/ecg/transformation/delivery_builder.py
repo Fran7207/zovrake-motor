@@ -64,14 +64,17 @@ class ErpDeliveryBuilder:
             analysis_result=AnalysisResultDeliveryReference(
                 result_reference_id=f"pending-{erp_request.process_id}",
                 prepared=True,
-                executed=False,
-                metadata={"start_accepted": True},
+                executed=bool(motor_response.executed),
+                metadata={"start_accepted": True, "motor_executed": bool(motor_response.executed)},
             ),
-            comparative_tables=ComparativeTablesDeliveryReference(prepared=True),
+            comparative_tables=ComparativeTablesDeliveryReference(
+                prepared=True,
+                metadata={"delivery_prepared": True, "motor_executed": bool(motor_response.executed)},
+            ),
             traceability=traceability,
             metadata={
                 "internal_api_contract": motor_response.contract_version,
-                "executed": False,
+                "executed": bool(motor_response.executed),
                 "source_data_preserved": True,
             },
         )
@@ -106,7 +109,7 @@ class ErpDeliveryBuilder:
             ),
             metadata={
                 "motor_state": motor_response.motor_state,
-                "executed": False,
+                "executed": bool(motor_response.executed),
                 "source_data_preserved": True,
             },
         )
@@ -147,7 +150,13 @@ class ErpDeliveryBuilder:
             analysis_result=result_ref,
             comparative_tables=ComparativeTablesDeliveryReference(
                 prepared=True,
-                metadata={"delivery_prepared": True},
+                metadata={
+                    "delivery_prepared": True,
+                    "motor_executed": bool(
+                        motor_response.executed
+                        or (motor_response.result is not None and motor_response.result.executed)
+                    ),
+                },
             ),
             traceability=self._build_traceability(
                 erp_request.process_id,
@@ -156,7 +165,10 @@ class ErpDeliveryBuilder:
                 pipeline_context,
             ),
             metadata={
-                "executed": False,
+                "executed": bool(
+                    motor_response.executed
+                    or (motor_response.result is not None and motor_response.result.executed)
+                ),
                 "source_data_preserved": True,
                 "immutable": True,
             },

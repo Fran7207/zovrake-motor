@@ -19,8 +19,15 @@ from zovrake_motor import (
     StateService,
     __version__,
 )
+from zovrake_motor.comparative_tables import ComparativeTablesService
 from zovrake_motor.config import ConfigurationProvider
 from zovrake_motor.events import EventManager
+from zovrake_motor.intelligent_analysis import IntelligentAnalysisService
+from zovrake_motor.motor_runtime import (
+    AnalysisResultRegistry,
+    CotizacionesAnalysisExecutor,
+    MotorExecutionBridge,
+)
 from zovrake_motor.states import StateManager
 
 
@@ -34,6 +41,8 @@ class MotorApiRuntime:
     coordinator: MotorCoordinator
     enterprise_integration: EnterpriseIntegrationService
     integration_api: IntegrationApiService
+    result_registry: AnalysisResultRegistry
+    motor_bridge: MotorExecutionBridge
 
     def initialize(self) -> None:
         for service in self._base_modules():
@@ -44,6 +53,10 @@ class MotorApiRuntime:
         self.coordinator.initialize_modules()
         self.coordinator.prepare_modules()
         self.integration_api.initialize()
+        self.enterprise_integration.bind_motor_execution(
+            invocation_handler=self.motor_bridge,
+            result_registry=self.result_registry,
+        )
 
     def _base_modules(self) -> list:
         return [
@@ -73,6 +86,16 @@ class MotorApiRuntime:
                 state_manager=self.state_manager,
                 event_manager=self.event_manager,
             ),
+            ComparativeTablesService(
+                config_provider=self.config,
+                state_manager=self.state_manager,
+                event_manager=self.event_manager,
+            ),
+            IntelligentAnalysisService(
+                config_provider=self.config,
+                state_manager=self.state_manager,
+                event_manager=self.event_manager,
+            ),
         ]
 
     def snapshot(self) -> dict[str, Any]:
@@ -82,6 +105,8 @@ class MotorApiRuntime:
             "integration_api_available": self.integration_api.is_available(),
             "enterprise_integration_available": self.enterprise_integration.is_available(),
             "modules_registered": self.coordinator.module_administrator.count(),
+            "motor_execution_bound": True,
+            "results_stored": self.result_registry.count(),
         }
 
 
@@ -110,6 +135,17 @@ def build_motor_api_runtime(
         event_manager=event_manager,
         enterprise_service=enterprise_integration,
     )
+    result_registry = AnalysisResultRegistry()
+    executor = CotizacionesAnalysisExecutor(
+        result_registry=result_registry,
+        config_provider=config,
+        state_manager=state_manager,
+        event_manager=event_manager,
+    )
+    motor_bridge = MotorExecutionBridge(
+        executor=executor,
+        result_registry=result_registry,
+    )
     runtime = MotorApiRuntime(
         config=config,
         state_manager=state_manager,
@@ -117,6 +153,8 @@ def build_motor_api_runtime(
         coordinator=coordinator,
         enterprise_integration=enterprise_integration,
         integration_api=integration_api,
+        result_registry=result_registry,
+        motor_bridge=motor_bridge,
     )
     runtime.initialize()
     return runtime
