@@ -36,23 +36,27 @@ class MotorUnitGateway:
         self._invocation_handler = handler
 
     def invoke_prepared(
-        self,
-        *,
-        process_id: UUID,
-        codigo_req: str,
-        operation: str,
-        document_ids: tuple[str, ...] = (),
-        metadata: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
+    self,
+    *,
+    process_id: UUID,
+    codigo_req: str,
+    operation: str,
+    document_ids: tuple[str, ...] = (),
+    document_references: tuple[dict[str, Any], ...] = (),
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
         """Invoca el Motor como unidad única (handler inyectado o stub de preparación)."""
         if self._invocation_handler is not None:
             result = self._invocation_handler(
-                process_id=process_id,
-                codigo_req=codigo_req,
-                operation=operation,
-                document_ids=document_ids,
-                metadata=dict(metadata or {}),
-            )
+    process_id=process_id,
+    codigo_req=codigo_req,
+    operation=operation,
+    document_ids=document_ids,
+    document_references=document_references,
+    metadata=dict(metadata or {}),
+)
+
+
             if isinstance(result, dict):
                 return {
                     "invoked": bool(result.get("invoked", result.get("executed", False))),
