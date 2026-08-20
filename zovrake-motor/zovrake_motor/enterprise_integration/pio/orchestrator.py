@@ -21,13 +21,17 @@ from zovrake_motor.enterprise_integration.internal_api.contracts.responses impor
     StartAnalysisResponse,
     ValidateAnalysisResponse,
 )
-from zovrake_motor.enterprise_integration.internal_api.enums import InternalApiErrorCode
+from zovrake_motor.enterprise_integration.internal_api.enums import (
+    InternalApiErrorCode,
+)
 from zovrake_motor.enterprise_integration.pio.enums import (
     IntegrationPipelinePhase,
     PipelineOrchestrationOperation,
 )
 from zovrake_motor.enterprise_integration.pio.events import PipelineEventRecorder
-from zovrake_motor.enterprise_integration.pio.lifecycle import IntegrationPipelineLifecycle
+from zovrake_motor.enterprise_integration.pio.lifecycle import (
+    IntegrationPipelineLifecycle,
+)
 from zovrake_motor.enterprise_integration.pio.models import (
     PipelineExecutionContext,
     PipelineOrchestrationResult,
@@ -35,15 +39,27 @@ from zovrake_motor.enterprise_integration.pio.models import (
     utc_now,
 )
 from zovrake_motor.enterprise_integration.pio.motor_gateway import MotorUnitGateway
-from zovrake_motor.enterprise_integration.pio.traceability import PipelineTraceabilityStore
+from zovrake_motor.enterprise_integration.pio.traceability import (
+    PipelineTraceabilityStore,
+)
 from zovrake_motor.states.exceptions import StateManagementError
 
 if TYPE_CHECKING:
-    from zovrake_motor.enterprise_integration.integration import EnterpriseIntegrationMotorIntegration
-    from zovrake_motor.enterprise_integration.internal_api.api import InternalIntegrationApi
-    from zovrake_motor.enterprise_integration.ommf.ports import IntegrationObservabilityPort
-    from zovrake_motor.enterprise_integration.posf.ports import IntegrationPerformancePort
-    from zovrake_motor.enterprise_integration.svaf.ports import PipelineValidationGatePort
+    from zovrake_motor.enterprise_integration.integration import (
+        EnterpriseIntegrationMotorIntegration,
+    )
+    from zovrake_motor.enterprise_integration.internal_api.api import (
+        InternalIntegrationApi,
+    )
+    from zovrake_motor.enterprise_integration.ommf.ports import (
+        IntegrationObservabilityPort,
+    )
+    from zovrake_motor.enterprise_integration.posf.ports import (
+        IntegrationPerformancePort,
+    )
+    from zovrake_motor.enterprise_integration.svaf.ports import (
+        PipelineValidationGatePort,
+    )
 
 
 class PipelineIntegrationOrchestrator:
@@ -73,10 +89,16 @@ class PipelineIntegrationOrchestrator:
     def bind_validation_gate(self, gate: PipelineValidationGatePort) -> None:
         self._validation_gate = gate
 
-    def bind_observability(self, observability: IntegrationObservabilityPort) -> None:
+    def bind_observability(
+        self,
+        observability: IntegrationObservabilityPort,
+    ) -> None:
         self._observability = observability
 
-    def bind_performance_optimizer(self, optimizer: IntegrationPerformancePort) -> None:
+    def bind_performance_optimizer(
+        self,
+        optimizer: IntegrationPerformancePort,
+    ) -> None:
         self._performance_optimizer = optimizer
 
     @property
@@ -95,7 +117,11 @@ class PipelineIntegrationOrchestrator:
         return self._initialized and self._motor_gateway.is_prepared
 
     def _settings(self):
-        return self._integration.enterprise_integration_settings().pipeline_integration_orchestrator
+        return (
+            self._integration
+            .enterprise_integration_settings()
+            .pipeline_integration_orchestrator
+        )
 
     def _create_context(
         self,
@@ -129,7 +155,8 @@ class PipelineIntegrationOrchestrator:
             to_phase,
         ):
             raise ValueError(
-                f"Transición no permitida: {context.current_phase} -> {to_phase.value}",
+                f"Transición no permitida: "
+                f"{context.current_phase} -> {to_phase.value}"
             )
 
         transition = PipelineTransitionRecord(
@@ -141,7 +168,9 @@ class PipelineIntegrationOrchestrator:
         context.current_phase = to_phase
         context.updated_at = utc_now()
 
-        motor_state = IntegrationPipelineLifecycle.motor_state_for_phase(to_phase)
+        motor_state = IntegrationPipelineLifecycle.motor_state_for_phase(
+            to_phase
+        )
         if motor_state is not None:
             self._sync_motor_state(context, motor_state, reason)
 
@@ -151,16 +180,20 @@ class PipelineIntegrationOrchestrator:
             operation=operation.value,
             reason=reason,
         )
+
         if self._observability is not None:
             self._observability.record_pipeline_transition(
                 process_id=context.process_id,
                 project_id=context.project_id,
-                quotation_id=str(context.metadata.get("quotation_id", "")),
+                quotation_id=str(
+                    context.metadata.get("quotation_id", "")
+                ),
                 component="PipelineIntegrationOrchestrator",
                 pipeline_phase=to_phase.value,
                 operation=operation.value,
                 duration_ms=0.0,
             )
+
         if self._performance_optimizer is not None:
             self._performance_optimizer.record_pipeline_transition(
                 process_id=context.process_id,
@@ -168,7 +201,9 @@ class PipelineIntegrationOrchestrator:
                 operation=operation.value,
                 transition_count=len(context.transitions),
                 project_id=context.project_id,
-                quotation_id=str(context.metadata.get("quotation_id", "")),
+                quotation_id=str(
+                    context.metadata.get("quotation_id", "")
+                ),
             )
 
     def _sync_motor_state(
@@ -179,6 +214,7 @@ class PipelineIntegrationOrchestrator:
     ) -> None:
         state_manager = self._integration.state_manager
         record = state_manager.get_process(context.process_id)
+
         if record is None:
             try:
                 state_manager.create_process(
@@ -195,7 +231,11 @@ class PipelineIntegrationOrchestrator:
                 record = state_manager.get_process(context.process_id)
 
         if record is not None and record.current_state != motor_state:
-            state_manager.update_state(context.process_id, motor_state, reason)
+            state_manager.update_state(
+                context.process_id,
+                motor_state,
+                reason,
+            )
 
     def _run_phases(
         self,
@@ -209,7 +249,12 @@ class PipelineIntegrationOrchestrator:
 
         for phase in flow:
             try:
-                self._advance_phase(context, operation, phase, reason=f"Avance {operation.value}")
+                self._advance_phase(
+                    context,
+                    operation,
+                    phase,
+                    reason=f"Avance {operation.value}",
+                )
             except ValueError as exc:
                 self._advance_phase(
                     context,
@@ -222,11 +267,14 @@ class PipelineIntegrationOrchestrator:
                     error_code=InternalApiErrorCode.OPERATION_NOT_EXECUTED,
                     message=str(exc),
                     process_id=context.process_id,
-                    details={"pipeline_context": context.to_dict()},
+                    details={
+                        "pipeline_context": context.to_dict()
+                    },
                 )
 
             phases_completed.append(phase)
             handler_result = phase_handler(context, phase)
+
             if isinstance(handler_result, InternalApiErrorResponse):
                 self._advance_phase(
                     context,
@@ -243,10 +291,14 @@ class PipelineIntegrationOrchestrator:
             operation=operation.value,
             success=True,
         )
+
         return PipelineOrchestrationResult(
             context=context,
             success=True,
-            message=f"Pipeline {operation.value} completado — sin ejecución interna",
+            message=(
+                f"Pipeline {operation.value} completado "
+                "— sin ejecución interna"
+            ),
             phases_completed=tuple(phases_completed),
             executed=False,
         )
@@ -264,32 +316,50 @@ class PipelineIntegrationOrchestrator:
             )
 
         gate = self._validation_gate
+
         if gate is not None:
             internal_check = gate.validate_internal_request(request)
+
             if not internal_check.approved:
                 return InternalApiErrorResponse(
-                    error_code=InternalApiErrorCode.STRUCTURAL_VALIDATION_FAILED,
-                    message="Validación SVAF fallida — Pipeline bloqueado",
+                    error_code=(
+                        InternalApiErrorCode.STRUCTURAL_VALIDATION_FAILED
+                    ),
+                    message=(
+                        "Validación SVAF fallida — "
+                        "Pipeline bloqueado"
+                    ),
                     process_id=request.process_id,
                     details={
                         "validation_errors": [
-                            issue.message for issue in internal_check.validation.issues
+                            issue.message
+                            for issue in internal_check.validation.issues
                         ],
                     },
                 )
+
             authorization = gate.authorize_pipeline_entry(
                 process_id=request.process_id,
-                operation=PipelineOrchestrationOperation.START_ANALYSIS.value,
+                operation=(
+                    PipelineOrchestrationOperation.START_ANALYSIS.value
+                ),
                 metadata=request.metadata,
             )
+
             if not authorization.approved:
                 return InternalApiErrorResponse(
-                    error_code=InternalApiErrorCode.STRUCTURAL_VALIDATION_FAILED,
-                    message="Autorización SVAF denegada — Pipeline bloqueado",
+                    error_code=(
+                        InternalApiErrorCode.STRUCTURAL_VALIDATION_FAILED
+                    ),
+                    message=(
+                        "Autorización SVAF denegada — "
+                        "Pipeline bloqueado"
+                    ),
                     process_id=request.process_id,
                     details={
                         "validation_errors": [
-                            issue.message for issue in authorization.validation.issues
+                            issue.message
+                            for issue in authorization.validation.issues
                         ],
                     },
                 )
@@ -300,10 +370,19 @@ class PipelineIntegrationOrchestrator:
             codigo_req=request.codigo_req,
             metadata=request.metadata,
         )
-        api_response: StartAnalysisResponse | InternalApiErrorResponse | None = None
 
-        def handler(ctx: PipelineExecutionContext, phase: IntegrationPipelinePhase):
+        api_response: (
+            StartAnalysisResponse
+            | InternalApiErrorResponse
+            | None
+        ) = None
+
+        def handler(
+            ctx: PipelineExecutionContext,
+            phase: IntegrationPipelinePhase,
+        ):
             nonlocal api_response
+
             if phase == IntegrationPipelinePhase.VALIDACION_INICIADA:
                 validation = internal_api.validate_request(
                     ValidateAnalysisRequest(
@@ -312,29 +391,50 @@ class PipelineIntegrationOrchestrator:
                         contract_version=request.contract_version,
                         payload={
                             "codigo_req": request.codigo_req,
-                            "document_ids": list(request.document_ids),
+                            "document_ids": list(
+                                request.document_ids
+                            ),
                         },
-                    ),
+                    )
                 )
+
                 if isinstance(validation, InternalApiErrorResponse):
                     return validation
+
                 if not validation.valid:
                     return InternalApiErrorResponse(
-                        error_code=InternalApiErrorCode.STRUCTURAL_VALIDATION_FAILED,
+                        error_code=(
+                            InternalApiErrorCode.STRUCTURAL_VALIDATION_FAILED
+                        ),
                         message="Validación estructural fallida en PIO",
                         process_id=request.process_id,
-                        details={"validation_errors": list(validation.validation_errors)},
+                        details={
+                            "validation_errors": list(
+                                validation.validation_errors
+                            )
+                        },
                     )
+
             if phase == IntegrationPipelinePhase.INVOCACION_MOTOR_PREPARADA:
                 invocation = self._motor_gateway.invoke_prepared(
                     process_id=request.process_id,
                     codigo_req=request.codigo_req,
-                    operation=PipelineOrchestrationOperation.START_ANALYSIS.value,
+                    operation=(
+                        PipelineOrchestrationOperation.START_ANALYSIS.value
+                    ),
                     document_ids=tuple(request.document_ids),
+                    document_references=tuple(
+                        request.document_references
+                    ),
                     metadata=dict(request.metadata),
                 )
+
                 ctx.motor_invocation_prepared = invocation["prepared"]
-                ctx.motor_executed = bool(invocation.get("invoked") or invocation.get("executed"))
+                ctx.motor_executed = bool(
+                    invocation.get("invoked")
+                    or invocation.get("executed")
+                )
+
                 ctx.metadata["motor_invocation"] = {
                     key: invocation[key]
                     for key in (
@@ -346,9 +446,11 @@ class PipelineIntegrationOrchestrator:
                     )
                     if key in invocation
                 }
+
             if phase == IntegrationPipelinePhase.RESULTADO_GENERADO:
                 api_response = internal_api.start_analysis(request)
                 return api_response
+
             return None
 
         pipeline_result = self._run_phases(
@@ -356,10 +458,19 @@ class PipelineIntegrationOrchestrator:
             PipelineOrchestrationOperation.START_ANALYSIS,
             phase_handler=handler,
         )
-        if isinstance(pipeline_result, InternalApiErrorResponse):
+
+        if isinstance(
+            pipeline_result,
+            InternalApiErrorResponse,
+        ):
             return pipeline_result
-        if isinstance(api_response, InternalApiErrorResponse):
+
+        if isinstance(
+            api_response,
+            InternalApiErrorResponse,
+        ):
             return api_response
+
         if api_response is None:
             return InternalApiErrorResponse(
                 error_code=InternalApiErrorCode.OPERATION_NOT_EXECUTED,
@@ -368,6 +479,7 @@ class PipelineIntegrationOrchestrator:
             )
 
         motor_executed = bool(context.motor_executed)
+
         return StartAnalysisResponse(
             process_id=api_response.process_id,
             success=api_response.success,
@@ -404,13 +516,23 @@ class PipelineIntegrationOrchestrator:
             codigo_req=request.codigo_req,
             metadata=request.metadata,
         )
-        api_response: AnalysisStatusResponse | InternalApiErrorResponse | None = None
 
-        def handler(_ctx: PipelineExecutionContext, phase: IntegrationPipelinePhase):
+        api_response: (
+            AnalysisStatusResponse
+            | InternalApiErrorResponse
+            | None
+        ) = None
+
+        def handler(
+            _ctx: PipelineExecutionContext,
+            phase: IntegrationPipelinePhase,
+        ):
             nonlocal api_response
+
             if phase == IntegrationPipelinePhase.RESULTADO_ENTREGADO:
                 api_response = internal_api.query_status(request)
                 return api_response
+
             return None
 
         pipeline_result = self._run_phases(
@@ -418,10 +540,19 @@ class PipelineIntegrationOrchestrator:
             PipelineOrchestrationOperation.QUERY_STATUS,
             phase_handler=handler,
         )
-        if isinstance(pipeline_result, InternalApiErrorResponse):
+
+        if isinstance(
+            pipeline_result,
+            InternalApiErrorResponse,
+        ):
             return pipeline_result
-        if isinstance(api_response, InternalApiErrorResponse):
+
+        if isinstance(
+            api_response,
+            InternalApiErrorResponse,
+        ):
             return api_response
+
         if api_response is None:
             return InternalApiErrorResponse(
                 error_code=InternalApiErrorCode.OPERATION_NOT_EXECUTED,
@@ -462,13 +593,23 @@ class PipelineIntegrationOrchestrator:
             codigo_req=request.codigo_req,
             metadata=request.metadata,
         )
-        api_response: AnalysisResultResponse | InternalApiErrorResponse | None = None
 
-        def handler(_ctx: PipelineExecutionContext, phase: IntegrationPipelinePhase):
+        api_response: (
+            AnalysisResultResponse
+            | InternalApiErrorResponse
+            | None
+        ) = None
+
+        def handler(
+            _ctx: PipelineExecutionContext,
+            phase: IntegrationPipelinePhase,
+        ):
             nonlocal api_response
+
             if phase == IntegrationPipelinePhase.RESULTADO_GENERADO:
                 api_response = internal_api.query_result(request)
                 return api_response
+
             return None
 
         pipeline_result = self._run_phases(
@@ -476,10 +617,19 @@ class PipelineIntegrationOrchestrator:
             PipelineOrchestrationOperation.QUERY_RESULT,
             phase_handler=handler,
         )
-        if isinstance(pipeline_result, InternalApiErrorResponse):
+
+        if isinstance(
+            pipeline_result,
+            InternalApiErrorResponse,
+        ):
             return pipeline_result
-        if isinstance(api_response, InternalApiErrorResponse):
+
+        if isinstance(
+            api_response,
+            InternalApiErrorResponse,
+        ):
             return api_response
+
         if api_response is None:
             return InternalApiErrorResponse(
                 error_code=InternalApiErrorCode.OPERATION_NOT_EXECUTED,
@@ -489,8 +639,12 @@ class PipelineIntegrationOrchestrator:
 
         result_executed = bool(
             api_response.executed
-            or (api_response.result is not None and api_response.result.executed)
+            or (
+                api_response.result is not None
+                and api_response.result.executed
+            )
         )
+
         return AnalysisResultResponse(
             process_id=api_response.process_id,
             success=api_response.success,
@@ -524,13 +678,23 @@ class PipelineIntegrationOrchestrator:
             codigo_req=request.codigo_req,
             metadata=request.metadata,
         )
-        api_response: CancelAnalysisResponse | InternalApiErrorResponse | None = None
 
-        def handler(_ctx: PipelineExecutionContext, phase: IntegrationPipelinePhase):
+        api_response: (
+            CancelAnalysisResponse
+            | InternalApiErrorResponse
+            | None
+        ) = None
+
+        def handler(
+            _ctx: PipelineExecutionContext,
+            phase: IntegrationPipelinePhase,
+        ):
             nonlocal api_response
+
             if phase == IntegrationPipelinePhase.ERROR_CONTROLADO:
                 api_response = internal_api.cancel_analysis(request)
                 return api_response
+
             return None
 
         pipeline_result = self._run_phases(
@@ -538,10 +702,19 @@ class PipelineIntegrationOrchestrator:
             PipelineOrchestrationOperation.CANCEL_ANALYSIS,
             phase_handler=handler,
         )
-        if isinstance(pipeline_result, InternalApiErrorResponse):
+
+        if isinstance(
+            pipeline_result,
+            InternalApiErrorResponse,
+        ):
             return pipeline_result
-        if isinstance(api_response, InternalApiErrorResponse):
+
+        if isinstance(
+            api_response,
+            InternalApiErrorResponse,
+        ):
             return api_response
+
         if api_response is None:
             return InternalApiErrorResponse(
                 error_code=InternalApiErrorCode.OPERATION_NOT_EXECUTED,
@@ -580,13 +753,23 @@ class PipelineIntegrationOrchestrator:
             codigo_req=request.codigo_req,
             metadata=request.metadata,
         )
-        api_response: ValidateAnalysisResponse | InternalApiErrorResponse | None = None
 
-        def handler(_ctx: PipelineExecutionContext, phase: IntegrationPipelinePhase):
+        api_response: (
+            ValidateAnalysisResponse
+            | InternalApiErrorResponse
+            | None
+        ) = None
+
+        def handler(
+            _ctx: PipelineExecutionContext,
+            phase: IntegrationPipelinePhase,
+        ):
             nonlocal api_response
+
             if phase == IntegrationPipelinePhase.VALIDACION_INICIADA:
                 api_response = internal_api.validate_request(request)
                 return api_response
+
             return None
 
         pipeline_result = self._run_phases(
@@ -594,10 +777,19 @@ class PipelineIntegrationOrchestrator:
             PipelineOrchestrationOperation.VALIDATE_REQUEST,
             phase_handler=handler,
         )
-        if isinstance(pipeline_result, InternalApiErrorResponse):
+
+        if isinstance(
+            pipeline_result,
+            InternalApiErrorResponse,
+        ):
             return pipeline_result
-        if isinstance(api_response, InternalApiErrorResponse):
+
+        if isinstance(
+            api_response,
+            InternalApiErrorResponse,
+        ):
             return api_response
+
         if api_response is None:
             return InternalApiErrorResponse(
                 error_code=InternalApiErrorCode.OPERATION_NOT_EXECUTED,
@@ -618,11 +810,15 @@ class PipelineIntegrationOrchestrator:
             },
         )
 
-    def get_pipeline_context(self, process_id: UUID) -> PipelineExecutionContext | None:
+    def get_pipeline_context(
+        self,
+        process_id: UUID,
+    ) -> PipelineExecutionContext | None:
         return self._traceability.get(process_id)
 
     def snapshot(self) -> dict[str, Any]:
         settings = self._settings()
+
         return {
             "initialized": self._initialized,
             "ready": self.is_ready(),
