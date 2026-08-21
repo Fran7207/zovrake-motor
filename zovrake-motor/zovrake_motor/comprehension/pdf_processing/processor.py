@@ -89,6 +89,7 @@ class PDFDocumentProcessor:
         all_images: list[PdfImage] = []
         full_text_parts: list[str] = []
         document_warnings: list[str] = []
+        document_errors: list[str] = []
 
         page_count = len(reader.pages)
 
@@ -124,44 +125,55 @@ class PDFDocumentProcessor:
                         f"{page_result.text}"
                     )
 
-                document_warnings.extend(
-                    page_result.warnings
-                )
+                document_warnings.extend(page_result.warnings)
 
             except Exception as exc:
-                document_warnings.append(
+                error_message = (
                     f"Página {page_number}: "
                     f"no pudo analizarse completamente: {exc}"
                 )
 
+                document_errors.append(error_message)
+
+                try:
+                    page_width = float(
+                        getattr(
+                            plumber_pdf.pages[index],
+                            "width",
+                            0.0,
+                        )
+                        or 0.0
+                    )
+                except Exception:
+                    page_width = 0.0
+
+                try:
+                    page_height = float(
+                        getattr(
+                            plumber_pdf.pages[index],
+                            "height",
+                            0.0,
+                        )
+                        or 0.0
+                    )
+                except Exception:
+                    page_height = 0.0
+
                 pages.append(
                     PdfPageAnalysis(
                         page_number=page_number,
-                        width=float(
-                            getattr(
-                                plumber_pdf.pages[index],
-                                "width",
-                                0.0,
-                            )
-                        ),
-                        height=float(
-                            getattr(
-                                plumber_pdf.pages[index],
-                                "height",
-                                0.0,
-                            )
-                        ),
+                        width=page_width,
+                        height=page_height,
                         text="",
                         requires_ocr=True,
-                        warnings=(
-                            f"No se pudo procesar completamente "
-                            f"la página: {exc}",
-                        ),
+                        warnings=(error_message,),
                     )
                 )
 
         full_text = "\n\n".join(
-            part for part in full_text_parts if part.strip()
+            part
+            for part in full_text_parts
+            if part.strip()
         ).strip()
 
         ocr_required = any(
@@ -175,6 +187,12 @@ class PDFDocumentProcessor:
             document_warnings.append(
                 "Una o más páginas requieren OCR. "
                 "La ejecución OCR se implementará en la siguiente etapa."
+            )
+
+        if document_errors:
+            document_warnings.append(
+                "El documento fue procesado parcialmente. "
+                "Una o más páginas presentaron errores."
             )
 
         return ProcessedPdfDocument(
@@ -191,7 +209,9 @@ class PDFDocumentProcessor:
             warnings=tuple(
                 dict.fromkeys(document_warnings)
             ),
-            errors=(),
+            errors=tuple(
+                dict.fromkeys(document_errors)
+            ),
         )
 
     def _process_page(
@@ -206,6 +226,7 @@ class PDFDocumentProcessor:
         width = float(
             getattr(plumber_page, "width", 0.0) or 0.0
         )
+
         height = float(
             getattr(plumber_page, "height", 0.0) or 0.0
         )
@@ -239,9 +260,10 @@ class PDFDocumentProcessor:
         has_tables = bool(tables)
         has_images = bool(images)
 
-        requires_ocr = (
-            not has_text
-            or len(text.strip()) < self.OCR_TEXT_THRESHOLD
+        requires_ocr = self._requires_ocr(
+            has_text=has_text,
+            has_images=has_images,
+            text_length=len(text.strip()),
         )
 
         return PdfPageAnalysis(
@@ -259,6 +281,39 @@ class PDFDocumentProcessor:
             warnings=tuple(warnings),
         )
 
+    @classmethod
+    def _requires_ocr(
+        cls,
+        *,
+        has_text: bool,
+        has_images: bool,
+        text_length: int,
+    ) -> bool:
+        """
+        Determina si una página requiere OCR.
+
+        No basta con tener poco texto para asumir que una página
+        es un escaneo. Una página válida puede contener solamente
+        una cantidad pequeña de texto.
+
+        En esta etapa se marca OCR como requerido principalmente cuando:
+        - no existe texto extraíble y existen imágenes;
+        - existe muy poco texto y además existen imágenes.
+
+        La ejecución real de OCR pertenece a una etapa posterior.
+        """
+        if not has_text and has_images:
+            return True
+
+        if (
+            has_text
+            and text_length < cls.OCR_TEXT_THRESHOLD
+            and has_images
+        ):
+            return True
+
+        return False
+
     @staticmethod
     def _extract_page_text(
         page: pdfplumber.page.Page,
@@ -269,7 +324,9 @@ class PDFDocumentProcessor:
                 x_tolerance=2,
                 y_tolerance=3,
             ) or ""
+
             return text.strip()
+
         except Exception as exc:
             warnings.append(
                 f"No se pudo extraer texto de la página: {exc}"
@@ -293,7 +350,9 @@ class PDFDocumentProcessor:
             )
 
             for index, word in enumerate(words):
-                text = str(word.get("text") or "").strip()
+                text = str(
+                    word.get("text") or ""
+                ).strip()
 
                 if not text:
                     continue
@@ -392,10 +451,24 @@ class PDFDocumentProcessor:
             )
 
             for index, image in enumerate(page_images):
-                data = getattr(image, "data", b"") or b""
+                data = getattr(
+                    image,
+                    "data",
+                    b"",
+                ) or b""
 
-                width = getattr(image, "width", None)
-                height = getattr(image, "height", None)
+                width = getattr(
+                    image,
+                    "width",
+                    None,
+                )
+
+                height = getattr(
+                    image,
+                    "height",
+                    None,
+                )
+
                 name = str(
                     getattr(
                         image,
@@ -485,6 +558,7 @@ class PDFDocumentProcessor:
 
         for key, value in metadata.items():
             normalized_key = str(key).lstrip("/")
+
             result[normalized_key] = (
                 str(value)
                 if value is not None
