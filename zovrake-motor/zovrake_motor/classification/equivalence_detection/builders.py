@@ -30,9 +30,19 @@ def build_equivalence_traceability(
 ) -> EquivalenceTraceability:
     first = concepts[0]
     traceability = first.traceability
+
+    document_ids = tuple(
+        dict.fromkeys(
+            concept.traceability.document_id
+            for concept in concepts
+            if concept.traceability.document_id
+        )
+    )
+
     return EquivalenceTraceability(
         process_id=traceability.process_id,
         document_id=traceability.document_id,
+        document_ids=document_ids,
         model_id=traceability.model_id,
         source_normalized_catalog_id=catalog_view.catalog_id,
         concept_ids=tuple(concept.concept_id for concept in concepts),
