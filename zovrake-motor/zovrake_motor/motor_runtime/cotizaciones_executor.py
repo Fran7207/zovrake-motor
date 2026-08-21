@@ -144,13 +144,14 @@ class CotizacionesAnalysisExecutor:
             codigo_req=codigo_req,
             requirement_description=requirement_description,
         )
-        primary = documents[0]
-        internal_model = self._run_comprehension(
-            process_id=process_id,
-            document=primary,
-            codigo_req=codigo_req,
-            requirement_description=requirement_description,
-        )
+
+        if not internal_models:
+            raise ValueError(
+                "No se pudo generar ningún modelo documental."
+            )
+
+        internal_model = internal_models[0]
+
         domain_catalog = self._run_classification(
             process_id=process_id,
             internal_model=internal_model,
