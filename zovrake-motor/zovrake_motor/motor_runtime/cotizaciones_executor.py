@@ -542,6 +542,162 @@ class CotizacionesAnalysisExecutor:
         return normalized_catalog
 
     @staticmethod
+    def _build_collective_normalized_catalog(
+        *,
+        process_id: UUID,
+        normalized_catalogs: tuple[dict[str, Any], ...],
+    ) -> dict[str, Any]:
+        """
+        Consolida catálogos normalizados por documento sin modificar sus
+        conceptos ni su trazabilidad de origen.
+
+        La identidad de cada concepto se conserva mediante la combinación
+        de document_id, model_id, concept_id y normalized_concept_id.
+        La consolidación no ejecuta equivalencias ni grupos comparables.
+        """
+        if not normalized_catalogs:
+            raise ValueError(
+                "No se pueden consolidar catálogos normalizados vacíos."
+            )
+
+        collective_concepts: list[dict[str, Any]] = []
+        seen_concepts: set[tuple[str, str, str, str]] = set()
+        document_ids: list[str] = []
+        catalog_ids: list[str] = []
+        model_ids: list[str] = []
+        source_material_catalog_ids: list[str] = []
+        source_service_catalog_ids: list[str] = []
+
+        for catalog in normalized_catalogs:
+            if not isinstance(catalog, dict):
+                raise TypeError(
+                    "Cada catálogo normalizado debe ser un diccionario."
+                )
+
+            catalog_process_id = str(catalog.get("process_id", ""))
+            if catalog_process_id and catalog_process_id != str(process_id):
+                raise ValueError(
+                    "Todos los catálogos normalizados deben pertenecer al "
+                    "mismo process_id."
+                )
+
+            catalog_id = str(catalog.get("catalog_id", ""))
+            model_id = str(catalog.get("model_id", ""))
+            document_id = str(catalog.get("document_id", ""))
+
+            if catalog_id:
+                catalog_ids.append(catalog_id)
+            if model_id:
+                model_ids.append(model_id)
+            if document_id:
+                document_ids.append(document_id)
+
+            material_catalog_id = str(
+                catalog.get("source_material_catalog_id", "")
+            )
+            service_catalog_id = str(
+                catalog.get("source_service_catalog_id", "")
+            )
+            if material_catalog_id:
+                source_material_catalog_ids.append(material_catalog_id)
+            if service_catalog_id:
+                source_service_catalog_ids.append(service_catalog_id)
+
+            concepts = catalog.get("concepts", [])
+            if not isinstance(concepts, list):
+                raise TypeError(
+                    "El campo concepts de cada catálogo debe ser una lista."
+                )
+
+            for concept in concepts:
+                if not isinstance(concept, dict):
+                    raise TypeError(
+                        "Cada concepto normalizado debe ser un diccionario."
+                    )
+
+                model_reference = dict(
+                    concept.get("model_reference", {})
+                )
+                traceability = dict(
+                    concept.get("traceability", {})
+                )
+
+                concept_document_id = str(
+                    traceability.get(
+                        "document_id",
+                        model_reference.get(
+                            "document_id",
+                            document_id,
+                        ),
+                    )
+                )
+                concept_model_id = str(
+                    traceability.get(
+                        "model_id",
+                        model_reference.get(
+                            "model_id",
+                            model_id,
+                        ),
+                    )
+                )
+                concept_id = str(
+                    concept.get(
+                        "concept_id",
+                        model_reference.get("concept_id", ""),
+                    )
+                )
+                normalized_concept_id = str(
+                    concept.get("normalized_concept_id", "")
+                )
+
+                identity = (
+                    concept_document_id,
+                    concept_model_id,
+                    concept_id,
+                    normalized_concept_id,
+                )
+
+                if identity in seen_concepts:
+                    continue
+
+                seen_concepts.add(identity)
+                collective_concepts.append(copy.deepcopy(concept))
+
+        unique_document_ids = list(dict.fromkeys(document_ids))
+        unique_catalog_ids = list(dict.fromkeys(catalog_ids))
+        unique_model_ids = list(dict.fromkeys(model_ids))
+        unique_material_ids = list(
+            dict.fromkeys(source_material_catalog_ids)
+        )
+        unique_service_ids = list(
+            dict.fromkeys(source_service_catalog_ids)
+        )
+
+        collective_document_id = (
+            f"multi-document://{process_id}"
+        )
+        collective_model_id = f"collective-model://{process_id}"
+        collective_catalog_id = f"cne-collective://{process_id}"
+
+        return {
+            "catalog_id": collective_catalog_id,
+            "process_id": str(process_id),
+            "model_id": collective_model_id,
+            "document_id": collective_document_id,
+            "document_ids": unique_document_ids,
+            "document_count": len(unique_document_ids),
+            "source_catalog_ids": unique_catalog_ids,
+            "source_model_ids": unique_model_ids,
+            "source_material_catalog_ids": unique_material_ids,
+            "source_service_catalog_ids": unique_service_ids,
+            "concepts": collective_concepts,
+            "concepts_count": len(collective_concepts),
+            "equivalence_detection_prepared": True,
+            "comparable_group_builder_prepared": False,
+            "collective_normalization": True,
+            "source_data_preserved": True,
+        }
+
     def _build_document_classification_snapshot(
         *,
         process_id: UUID,
