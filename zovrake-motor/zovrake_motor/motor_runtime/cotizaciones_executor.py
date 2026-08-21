@@ -138,6 +138,12 @@ class CotizacionesAnalysisExecutor:
         if not documents:
             raise ValueError("No hay documentos de evidencia para analizar")
 
+        internal_models = self._run_comprehension_for_documents(
+            process_id=process_id,
+            documents=documents,
+            codigo_req=codigo_req,
+            requirement_description=requirement_description,
+        )
         primary = documents[0]
         internal_model = self._run_comprehension(
             process_id=process_id,
@@ -199,6 +205,69 @@ class CotizacionesAnalysisExecutor:
         )
         self._registry.store(stored)
         return stored
+
+    def _run_comprehension_for_documents(
+        self,
+        *,
+        process_id: UUID,
+        documents: tuple[ResolvedDocumentContent, ...],
+        codigo_req: str,
+        requirement_description: str,
+    ) -> tuple[dict[str, Any], ...]:
+        """
+        Ejecuta la comprensión documental individual para cada documento.
+
+        Regla:
+            1 documento = 1 modelo documental.
+
+        Esta etapa mantiene separados los documentos.
+        No realiza comparación ni mezcla información entre proveedores.
+        """
+        internal_models: list[dict[str, Any]] = []
+
+        for document in documents:
+            internal_model = self._run_comprehension(
+                process_id=process_id,
+                document=document,
+                codigo_req=codigo_req,
+                requirement_description=requirement_description,
+            )
+
+            model_copy = dict(internal_model)
+
+            model_copy.setdefault(
+                "document_id",
+                document.document_id,
+            )
+
+            model_copy.setdefault(
+                "document_label",
+                document.document_label,
+            )
+
+            model_copy.setdefault(
+                "file_name",
+                document.file_name,
+            )
+
+            model_copy.setdefault(
+                "provider_name",
+                document.provider_name,
+            )
+
+            model_copy.setdefault(
+                "source_document",
+                {
+                    "document_id": document.document_id,
+                    "document_label": document.document_label,
+                    "file_name": document.file_name,
+                    "provider_name": document.provider_name,
+                },
+            )
+
+            internal_models.append(model_copy)
+
+        return tuple(internal_models)
 
     def _run_comprehension(
         self,
