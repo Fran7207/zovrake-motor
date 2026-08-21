@@ -413,6 +413,123 @@ class CotizacionesAnalysisExecutor:
         )
         return model_result.model.to_dict()
 
+    def _run_document_classification(
+        self,
+        *,
+        process_id: UUID,
+        internal_model: dict[str, Any],
+        codigo_req: str,
+        requirement_description: str,
+    ) -> dict[str, Any]:
+        """
+        Clasifica un modelo documental de forma independiente.
+
+        Esta etapa llega hasta la normalización y conserva la identidad
+        documental. Las equivalencias y los grupos comparables se
+        ejecutarán posteriormente sobre el conjunto consolidado de
+        documentos.
+        """
+        concept_result = self._classification.analyze_concepts(
+            ConceptAnalysisRequest(
+                process_id=process_id,
+                internal_model=internal_model,
+            ),
+        )
+
+        concept_catalog = concept_result.catalog.to_dict()
+
+        if not concept_catalog.get("concepts"):
+            concept_catalog = self._seed_concepts_from_items(
+                concept_catalog,
+                internal_model,
+            )
+
+        material_result = self._classification.classify_materials(
+            MaterialClassificationRequest(
+                process_id=process_id,
+                concept_catalog=concept_catalog,
+            ),
+        )
+
+        service_result = self._classification.classify_services(
+            ServiceClassificationRequest(
+                process_id=process_id,
+                concept_catalog=concept_catalog,
+            ),
+        )
+
+        normalization_result = self._classification.normalize_concepts(
+            ConceptNormalizationRequest(
+                process_id=process_id,
+                material_catalog=material_result.catalog.to_dict(),
+                service_catalog=service_result.catalog.to_dict(),
+            ),
+        )
+
+        normalized_catalog = normalization_result.catalog.to_dict()
+
+        source_document = dict(
+            internal_model.get(
+                "source_document",
+                {},
+            )
+        )
+
+        document_id = str(
+            source_document.get(
+                "document_id",
+                internal_model.get(
+                    "document_id",
+                    "",
+                ),
+            )
+        )
+
+        document_label = str(
+            source_document.get(
+                "document_label",
+                internal_model.get(
+                    "document_label",
+                    "",
+                ),
+            )
+        )
+
+        file_name = str(
+            source_document.get(
+                "file_name",
+                internal_model.get(
+                    "file_name",
+                    "",
+                ),
+            )
+        )
+
+        provider_name = str(
+            source_document.get(
+                "provider_name",
+                internal_model.get(
+                    "provider_name",
+                    "",
+                ),
+            )
+        )
+
+        normalized_catalog["source_document"] = {
+            "document_id": document_id,
+            "document_label": document_label,
+            "file_name": file_name,
+            "provider_name": provider_name,
+        }
+
+        normalized_catalog["document_id"] = document_id
+        normalized_catalog["document_label"] = document_label
+        normalized_catalog["file_name"] = file_name
+        normalized_catalog["provider_name"] = provider_name
+        normalized_catalog["source_data_preserved"] = True
+
+        return normalized_catalog
+
     def _run_classification(
         self,
         *,
