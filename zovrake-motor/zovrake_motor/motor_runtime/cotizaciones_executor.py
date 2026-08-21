@@ -150,13 +150,24 @@ class CotizacionesAnalysisExecutor:
                 "No se pudo generar ningún modelo documental."
             )
 
-        internal_model = internal_models[0]
+        normalized_catalogs = tuple(
+            self._run_document_classification(
+                process_id=process_id,
+                internal_model=internal_model,
+                codigo_req=codigo_req,
+                requirement_description=requirement_description,
+            )
+            for internal_model in internal_models
+        )
 
-        domain_catalog = self._run_classification(
+        if not normalized_catalogs:
+            raise ValueError(
+                "No se pudo generar ningún catálogo de clasificación documental."
+            )
+
+        domain_catalog = self._build_document_classification_snapshot(
             process_id=process_id,
-            internal_model=internal_model,
-            codigo_req=codigo_req,
-            requirement_description=requirement_description,
+            normalized_catalogs=normalized_catalogs,
         )
         provider_ids = tuple(
             doc.provider_name or doc.document_id for doc in documents
@@ -529,6 +540,81 @@ class CotizacionesAnalysisExecutor:
         normalized_catalog["source_data_preserved"] = True
 
         return normalized_catalog
+
+    @staticmethod
+    def _build_document_classification_snapshot(
+        *,
+        process_id: UUID,
+        normalized_catalogs: tuple[dict[str, Any], ...],
+    ) -> dict[str, Any]:
+        """
+        Construye una representación colectiva de los catálogos
+        normalizados, conservando la identidad documental.
+
+        Esta etapa NO ejecuta equivalencias ni grupos comparables.
+        """
+        documents: list[dict[str, Any]] = []
+
+        for catalog in normalized_catalogs:
+            source_document = dict(
+                catalog.get(
+                    "source_document",
+                    {},
+                )
+            )
+
+            documents.append(
+                {
+                    "document_id": str(
+                        source_document.get(
+                            "document_id",
+                            catalog.get(
+                                "document_id",
+                                "",
+                            ),
+                        )
+                    ),
+                    "document_label": str(
+                        source_document.get(
+                            "document_label",
+                            catalog.get(
+                                "document_label",
+                                "",
+                            ),
+                        )
+                    ),
+                    "file_name": str(
+                        source_document.get(
+                            "file_name",
+                            catalog.get(
+                                "file_name",
+                                "",
+                            ),
+                        )
+                    ),
+                    "provider_name": str(
+                        source_document.get(
+                            "provider_name",
+                            catalog.get(
+                                "provider_name",
+                                "",
+                            ),
+                        )
+                    ),
+                    "catalog": catalog,
+                }
+            )
+
+        return {
+            "catalog_id": f"classification://{process_id}",
+            "process_id": str(process_id),
+            "documents": documents,
+            "document_count": len(documents),
+            "stage": "normalized_document_classification",
+            "equivalence_executed": False,
+            "comparable_groups_executed": False,
+            "source_data_preserved": True,
+        }
 
     def _run_classification(
         self,
