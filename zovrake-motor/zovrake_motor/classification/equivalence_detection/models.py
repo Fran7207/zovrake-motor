@@ -44,11 +44,13 @@ class EquivalenceTraceability:
     document_reference: str
     canonical_reference: str
     original_preserved: bool
+    document_ids: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "process_id": str(self.process_id),
             "document_id": self.document_id,
+            "document_ids": list(self.document_ids),
             "model_id": self.model_id,
             "source_normalized_catalog_id": self.source_normalized_catalog_id,
             "concept_ids": list(self.concept_ids),
@@ -107,11 +109,20 @@ class EquivalenceCatalog:
             "model_id": self.model_id,
             "document_id": self.document_id,
             "source_normalized_catalog_id": self.source_normalized_catalog_id,
-            "equivalences": [equivalence.to_dict() for equivalence in self.equivalences],
+            "equivalences": [
+                equivalence.to_dict()
+                for equivalence in self.equivalences
+            ],
             "equivalences_count": len(self.equivalences),
-            "comparable_group_builder_prepared": self.comparable_group_builder_prepared,
-            "context_association_prepared": self.context_association_prepared,
-            "comparative_domain_model_prepared": self.comparative_domain_model_prepared,
+            "comparable_group_builder_prepared": (
+                self.comparable_group_builder_prepared
+            ),
+            "context_association_prepared": (
+                self.context_association_prepared
+            ),
+            "comparative_domain_model_prepared": (
+                self.comparative_domain_model_prepared
+            ),
         }
 
 
@@ -177,8 +188,13 @@ class EquivalenceDetectionResult:
             "model_id": self.model_id,
             "catalog": self.catalog.to_dict(),
             "status": self.status.value,
-            "incidents": [incident.to_dict() for incident in self.incidents],
-            "normalized_catalog_preserved": self.normalized_catalog_preserved,
+            "incidents": [
+                incident.to_dict()
+                for incident in self.incidents
+            ],
+            "normalized_catalog_preserved": (
+                self.normalized_catalog_preserved
+            ),
             "detectors_executed": self.detectors_executed,
             "technical_observations": list(self.technical_observations),
         }
