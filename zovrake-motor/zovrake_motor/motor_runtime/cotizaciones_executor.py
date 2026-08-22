@@ -187,19 +187,15 @@ class CotizacionesAnalysisExecutor:
             )
         )
 
-        collective_context_association_catalog = self._run_collective_context_association(
+        domain_catalog = self._build_document_classification_snapshot(
             process_id=process_id,
-            collective_comparable_group_catalog=collective_comparable_group_catalog,
-            codigo_req=codigo_req,
-            requirement_description=requirement_description,
-        )
-        domain_catalog = self._run_collective_comparative_domain_model(
-            process_id=process_id,
-            collective_context_association_catalog=collective_context_association_catalog,
-            codigo_req=codigo_req,
+            normalized_catalogs=normalized_catalogs,
         )
         provider_ids = tuple(
             doc.provider_name or doc.document_id for doc in documents
+        )
+        provider_source_map = self._build_provider_source_map(
+            documents,
         )
         definitive_catalog = self._run_comparative_tables(
             process_id=process_id,
@@ -236,14 +232,14 @@ class CotizacionesAnalysisExecutor:
                 "quotation_id": metadata.get("quotation_id", ""),
                 "source_data_preserved": True,
                 "providers": list(provider_ids),
+                "provider_source_map": provider_source_map,
                 "pipeline_stages": [
                     "comprehension",
                     "document_classification",
                     "collective_normalization",
                     "collective_equivalence_detection",
                     "collective_comparable_groups",
-                    "collective_context_association",
-                    "comparative_domain_model",
+                    "classification_snapshot",
                     "comparative_tables",
                     "intelligent_analysis",
                 ],
@@ -258,18 +254,6 @@ class CotizacionesAnalysisExecutor:
                     "comparable_group_count": int(
                         collective_comparable_group_catalog.get(
                             "groups_count",
-                            0,
-                        )
-                    ),
-                    "context_association_count": int(
-                        collective_context_association_catalog.get(
-                            "associations_count",
-                            0,
-                        )
-                    ),
-                    "comparative_domain_model_count": int(
-                        domain_catalog.get(
-                            "models_count",
                             0,
                         )
                     ),
@@ -987,71 +971,6 @@ class CotizacionesAnalysisExecutor:
 
         return catalog
 
-    def _run_collective_context_association(
-        self,
-        *,
-        process_id: UUID,
-        collective_comparable_group_catalog: dict[str, Any],
-        codigo_req: str,
-        requirement_description: str,
-    ) -> dict[str, Any]:
-        if not collective_comparable_group_catalog:
-            raise ValueError("El catálogo colectivo de grupos comparables no puede estar vacío.")
-
-        result = self._classification.associate_context(
-            ContextAssociationRequest(
-                process_id=process_id,
-                comparable_group_catalog=copy.deepcopy(collective_comparable_group_catalog),
-                integrated_context={
-                    "context_id": f"ctx://{process_id}",
-                    "description": requirement_description or codigo_req,
-                    "process_id": str(process_id),
-                    "codigo_req": codigo_req,
-                    "immutable": True,
-                },
-                codigo_req=codigo_req,
-                metadata={
-                    "scope": "collective_multi_document",
-                    "document_ids": list(collective_comparable_group_catalog.get("document_ids", [])),
-                },
-            ),
-        )
-        catalog = result.catalog.to_dict()
-        expected = tuple(collective_comparable_group_catalog.get("document_ids", []))
-        actual = tuple(catalog.get("document_ids", []))
-        if actual != expected:
-            raise RuntimeError("CAE no preservó document_ids del catálogo colectivo.")
-        return catalog
-
-    def _run_collective_comparative_domain_model(
-        self,
-        *,
-        process_id: UUID,
-        collective_context_association_catalog: dict[str, Any],
-        codigo_req: str,
-    ) -> dict[str, Any]:
-        result = self._classification.build_comparative_domain_model(
-            ComparativeDomainModelBuildRequest(
-                process_id=process_id,
-                context_association_catalog=copy.deepcopy(collective_context_association_catalog),
-                codigo_req=codigo_req,
-                metadata={
-                    "scope": "collective_multi_document",
-                    "document_ids": list(collective_context_association_catalog.get("document_ids", [])),
-                },
-            ),
-        )
-        catalog = result.catalog.to_dict()
-        expected = tuple(collective_context_association_catalog.get("document_ids", []))
-        actual = tuple(catalog.get("document_ids", []))
-        if actual != expected:
-            raise RuntimeError("CDMB no preservó document_ids del catálogo colectivo.")
-        for model in catalog.get("models", []):
-            model_doc_ids = tuple(model.get("traceability", {}).get("document_ids", []))
-            if model_doc_ids != expected:
-                raise RuntimeError("CDMB perdió la trazabilidad documental del modelo.")
-        return catalog
-
     def _run_classification(
         self,
         *,
@@ -1339,84 +1258,215 @@ class CotizacionesAnalysisExecutor:
         return catalog
 
     @staticmethod
+    def _build_provider_source_map(
+        documents: tuple[ResolvedDocumentContent, ...],
+    ) -> list[dict[str, Any]]:
+        """
+        Construye la relación proveedor ↔ documentos fuente.
+
+        `provider_id` mantiene la identidad del proveedor. `document_id`
+        mantiene la identidad individual del documento. Si un proveedor
+        tiene más de un documento fuente, todos sus documentos se conservan
+        y la entrada queda marcada como ambigua para cualquier resolución
+        que no disponga de un document_id explícito.
+        """
+        providers: dict[str, dict[str, Any]] = {}
+
+        for document in documents:
+            provider_name = str(
+                document.provider_name
+                or document.document_id
+                or "",
+            ).strip()
+
+            document_id = str(document.document_id).strip()
+
+            if not provider_name or not document_id:
+                continue
+
+            provider = providers.setdefault(
+                provider_name,
+                {
+                    "provider_id": provider_name,
+                    "provider_name": provider_name,
+                    "document_ids": [],
+                },
+            )
+
+            if document_id not in provider["document_ids"]:
+                provider["document_ids"].append(document_id)
+
+        return [
+            {
+                "provider_id": provider["provider_id"],
+                "provider_name": provider["provider_name"],
+                "document_ids": list(provider["document_ids"]),
+                "document_count": len(provider["document_ids"]),
+                "duplicate_document_source": (
+                    len(provider["document_ids"]) > 1
+                ),
+            }
+            for provider in providers.values()
+        ]
+
+    @staticmethod
     def _fill_cell_values_from_documents(
         definitive_catalog: dict[str, Any],
         documents: tuple[ResolvedDocumentContent, ...],
     ) -> dict[str, Any]:
         catalog = copy.deepcopy(definitive_catalog)
+
         by_document_id = {
-            doc.document_id: doc
-            for doc in documents
-            if doc.document_id
+            str(document.document_id): document
+            for document in documents
+            if str(document.document_id)
         }
-        provider_name_counts: dict[str, int] = {}
-        provider_name_map: dict[str, ResolvedDocumentContent] = {}
-        for doc in documents:
-            provider_name = (doc.provider_name or "").strip()
-            if not provider_name:
-                continue
-            provider_name_counts[provider_name] = provider_name_counts.get(provider_name, 0) + 1
-            provider_name_map[provider_name] = doc
-        by_provider = {
-            name: document
-            for name, document in provider_name_map.items()
-            if provider_name_counts.get(name, 0) == 1
-        }
+
+        documents_by_provider: dict[
+            str,
+            list[ResolvedDocumentContent],
+        ] = {}
+
+        for document in documents:
+            provider_name = str(
+                document.provider_name
+                or document.document_id
+                or "",
+            ).strip()
+
+            if provider_name:
+                documents_by_provider.setdefault(
+                    provider_name,
+                    [],
+                ).append(document)
+
         for model in catalog.get("models", []):
             rows = list(model.get("dynamic_rows", []))
             columns = list(model.get("dynamic_columns", []))
             attribute_by_column = {
-                str(col.get("column_id")): str(col.get("attribute_name", "")).lower()
+                str(col.get("column_id")): str(
+                    col.get("attribute_name", "")
+                ).lower()
                 for col in columns
             }
+
             enriched_rows = []
+
             for row in rows:
-                provider_id = str(row.get("provider_id", ""))
+                provider_id = str(
+                    row.get("provider_id", "")
+                ).strip()
+
                 document = by_document_id.get(provider_id)
-                if document is None:
-                    document = by_provider.get(provider_id)
+
+                provider_candidates = documents_by_provider.get(
+                    provider_id,
+                    [],
+                )
+
+                if document is None and len(provider_candidates) == 1:
+                    document = provider_candidates[0]
+
                 cells = []
+
                 for cell in row.get("cells_reserved", []):
                     cell_copy = dict(cell)
-                    attr = attribute_by_column.get(str(cell_copy.get("column_id")), "")
+
+                    attr = attribute_by_column.get(
+                        str(cell_copy.get("column_id")),
+                        "",
+                    )
+
                     value = CotizacionesAnalysisExecutor._resolve_cell_value(
                         attribute=attr,
                         document=document,
                         provider_id=provider_id,
                     )
+
                     if value:
                         cell_copy["value"] = value
                         cell_copy["value_prepared"] = True
+
                     cells.append(cell_copy)
+
                 row_copy = dict(row)
                 row_copy["cells_reserved"] = cells
-                metadata = dict(row_copy.get("metadata", {}))
+
+                metadata = dict(
+                    row_copy.get("metadata", {})
+                )
+
                 metadata["cell_values_prepared"] = True
+
+                metadata["provider_source_document_ids"] = [
+                    str(candidate.document_id)
+                    for candidate in provider_candidates
+                    if str(candidate.document_id)
+                ]
+
+                metadata["provider_source_document_count"] = len(
+                    provider_candidates
+                )
+
+                metadata["provider_source_ambiguous"] = (
+                    document is None
+                    and len(provider_candidates) > 1
+                )
+
                 if document is not None:
-                    metadata["provider_name"] = document.provider_name
-                    metadata["document_id"] = document.document_id
-                    metadata["commercial_total_amount"] = document.commercial_total_amount
-                    metadata["commercial_currency"] = document.commercial_currency
+                    metadata["provider_name"] = (
+                        document.provider_name
+                    )
+                    metadata["document_id"] = (
+                        document.document_id
+                    )
+                    metadata["commercial_total_amount"] = (
+                        document.commercial_total_amount
+                    )
+                    metadata["commercial_currency"] = (
+                        document.commercial_currency
+                    )
+
                 row_copy["metadata"] = metadata
                 enriched_rows.append(row_copy)
+
             model["dynamic_rows"] = enriched_rows
-            commercial = dict(model.get("commercial_information", {}))
+
+            commercial = dict(
+                model.get(
+                    "commercial_information",
+                    {},
+                )
+            )
+
             provider_fields = []
+
             for doc in documents:
                 provider_fields.append(
                     {
-                        "provider_id": doc.provider_name or doc.document_id,
+                        "provider_id": (
+                            doc.provider_name
+                            or doc.document_id
+                        ),
                         "provider_name": doc.provider_name,
                         "document_id": doc.document_id,
                         "currency": doc.commercial_currency,
                         "total_amount": doc.commercial_total_amount,
-                        "payment_terms": doc.commercial_payment_terms,
-                        "items": [dict(item) for item in doc.items],
+                        "payment_terms": (
+                            doc.commercial_payment_terms
+                        ),
+                        "items": [
+                            dict(item)
+                            for item in doc.items
+                        ],
                     }
                 )
+
             commercial["provider_fields"] = provider_fields
             model["commercial_information"] = commercial
+
         return catalog
+
 
     @staticmethod
     def _resolve_cell_value(
