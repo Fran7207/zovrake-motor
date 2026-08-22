@@ -15,6 +15,20 @@ from zovrake_motor.classification.equivalence_detection.models import DetectorRe
 from zovrake_motor.classification.equivalence_detection.port import EquivalenceDetectorPort
 
 
+def _is_cross_document_pair(
+    catalog_view: NormalizedConceptCatalogView,
+    left,
+    right,
+) -> bool:
+    """Permite restringir un catálogo colectivo a equivalencias entre documentos."""
+    if not bool(catalog_view.raw_catalog.get("cross_document_only", False)):
+        return True
+    left_document_id = str(left.traceability.document_id)
+    right_document_id = str(right.traceability.document_id)
+    return bool(left_document_id) and bool(right_document_id) and left_document_id != right_document_id
+
+
+
 class ExactNormalizedMatchDetector(EquivalenceDetectorPort):
     """
     Detecta equivalencias cuando el valor normalizado y el tipo de concepto coinciden.
@@ -40,6 +54,8 @@ class ExactNormalizedMatchDetector(EquivalenceDetectorPort):
         concepts = [concept for concept in catalog_view.concepts if concept.normalized_value.strip()]
 
         for left, right in combinations(concepts, 2):
+            if not _is_cross_document_pair(catalog_view, left, right):
+                continue
             if left.normalized_concept_id == right.normalized_concept_id:
                 continue
             if left.normalized_value != right.normalized_value:
@@ -119,6 +135,8 @@ class CrossTypeDistinctDetector(EquivalenceDetectorPort):
         concepts = [concept for concept in catalog_view.concepts if concept.normalized_value.strip()]
 
         for left, right in combinations(concepts, 2):
+            if not _is_cross_document_pair(catalog_view, left, right):
+                continue
             if left.normalized_value != right.normalized_value:
                 continue
             if left.concept_type == right.concept_type:
@@ -195,6 +213,8 @@ class SharedOriginRelationDetector(EquivalenceDetectorPort):
         concepts = list(catalog_view.concepts)
 
         for left, right in combinations(concepts, 2):
+            if not _is_cross_document_pair(catalog_view, left, right):
+                continue
             if left.concept_id != right.concept_id:
                 continue
             if left.normalized_concept_id == right.normalized_concept_id:

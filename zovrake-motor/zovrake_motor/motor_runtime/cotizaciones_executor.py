@@ -773,6 +773,55 @@ class CotizacionesAnalysisExecutor:
             "source_data_preserved": True,
         }
 
+    def _run_collective_equivalence_detection(
+        self,
+        *,
+        process_id: UUID,
+        collective_normalized_catalog: dict[str, Any],
+    ) -> dict[str, Any]:
+        """
+        Ejecuta el EDE sobre el catálogo normalizado colectivo.
+
+        Esta etapa únicamente detecta relaciones entre conceptos de
+        documentos distintos. No construye todavía grupos comparables,
+        PM6 ni tablas comparativas.
+        """
+        if not collective_normalized_catalog:
+            raise ValueError(
+                "El catálogo normalizado colectivo no puede estar vacío."
+            )
+
+        catalog_process_id = str(
+            collective_normalized_catalog.get("process_id", "")
+        )
+        if catalog_process_id and catalog_process_id != str(process_id):
+            raise ValueError(
+                "El catálogo normalizado colectivo pertenece a otro process_id."
+            )
+
+        prepared_catalog = copy.deepcopy(collective_normalized_catalog)
+        prepared_catalog["equivalence_detection_prepared"] = True
+        prepared_catalog["cross_document_only"] = True
+
+        result = self._classification.detect_equivalences(
+            EquivalenceDetectionRequest(
+                process_id=process_id,
+                normalized_catalog=prepared_catalog,
+                metadata={
+                    "scope": "collective_multi_document",
+                    "cross_document_only": True,
+                    "source_catalog_ids": list(
+                        prepared_catalog.get("source_catalog_ids", [])
+                    ),
+                    "document_ids": list(
+                        prepared_catalog.get("document_ids", [])
+                    ),
+                },
+            ),
+        )
+
+        return result.catalog.to_dict()
+
     def _run_classification(
         self,
         *,
