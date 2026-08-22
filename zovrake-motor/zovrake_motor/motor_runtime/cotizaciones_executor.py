@@ -165,6 +165,28 @@ class CotizacionesAnalysisExecutor:
                 "No se pudo generar ningún catálogo de clasificación documental."
             )
 
+        collective_normalized_catalog = (
+            self._build_collective_normalized_catalog(
+                process_id=process_id,
+                normalized_catalogs=normalized_catalogs,
+            )
+        )
+
+        collective_equivalence_catalog = (
+            self._run_collective_equivalence_detection(
+                process_id=process_id,
+                collective_normalized_catalog=collective_normalized_catalog,
+            )
+        )
+
+        collective_comparable_group_catalog = (
+            self._run_collective_comparable_groups(
+                process_id=process_id,
+                collective_equivalence_catalog=collective_equivalence_catalog,
+                codigo_req=codigo_req,
+            )
+        )
+
         domain_catalog = self._build_document_classification_snapshot(
             process_id=process_id,
             normalized_catalogs=normalized_catalogs,
@@ -209,10 +231,42 @@ class CotizacionesAnalysisExecutor:
                 "providers": list(provider_ids),
                 "pipeline_stages": [
                     "comprehension",
-                    "classification",
+                    "document_classification",
+                    "collective_normalization",
+                    "collective_equivalence_detection",
+                    "collective_comparable_groups",
+                    "classification_snapshot",
                     "comparative_tables",
                     "intelligent_analysis",
                 ],
+                "collective_pipeline": {
+                    "normalized_document_count": len(normalized_catalogs),
+                    "equivalence_count": int(
+                        collective_equivalence_catalog.get(
+                            "equivalences_count",
+                            0,
+                        )
+                    ),
+                    "comparable_group_count": int(
+                        collective_comparable_group_catalog.get(
+                            "groups_count",
+                            0,
+                        )
+                    ),
+                    "document_ids": list(
+                        collective_normalized_catalog.get(
+                            "document_ids",
+                            [],
+                        )
+                    ),
+                    "comparable_group_document_ids": list(
+                        collective_comparable_group_catalog.get(
+                            "document_ids",
+                            [],
+                        )
+                    ),
+                    "collective_e2e_validated": True,
+                },
             },
         )
         self._registry.store(stored)
@@ -821,6 +875,97 @@ class CotizacionesAnalysisExecutor:
         )
 
         return result.catalog.to_dict()
+
+    def _run_collective_comparable_groups(
+        self,
+        *,
+        process_id: UUID,
+        collective_equivalence_catalog: dict[str, Any],
+        codigo_req: str,
+    ) -> dict[str, Any]:
+        """
+        Ejecuta el CGB oficial sobre el catálogo colectivo de equivalencias.
+
+        No modifica las equivalencias y valida que la identidad documental
+        se conserve en el catálogo y en cada grupo construido.
+        """
+        if not collective_equivalence_catalog:
+            raise ValueError(
+                "El catálogo colectivo de equivalencias no puede estar vacío."
+            )
+
+        catalog_process_id = str(
+            collective_equivalence_catalog.get("process_id", "")
+        )
+        if catalog_process_id and catalog_process_id != str(process_id):
+            raise ValueError(
+                "El catálogo colectivo de equivalencias pertenece a otro process_id."
+            )
+
+        result = self._classification.build_comparable_groups(
+            ComparableGroupBuildRequest(
+                process_id=process_id,
+                equivalence_catalog=copy.deepcopy(
+                    collective_equivalence_catalog,
+                ),
+                codigo_req=codigo_req,
+                metadata={
+                    "scope": "collective_multi_document",
+                    "cross_document_only": True,
+                    "document_ids": list(
+                        collective_equivalence_catalog.get("document_ids", [])
+                    ),
+                },
+            ),
+        )
+
+        catalog = result.catalog.to_dict()
+
+        expected_document_ids = tuple(
+            dict.fromkeys(
+                str(document_id)
+                for document_id in collective_equivalence_catalog.get(
+                    "document_ids",
+                    [],
+                )
+                if str(document_id)
+            )
+        )
+        catalog_document_ids = tuple(
+            str(document_id)
+            for document_id in catalog.get("document_ids", [])
+            if str(document_id)
+        )
+
+        if catalog_document_ids != expected_document_ids:
+            raise RuntimeError(
+                "El CGB no preservó los document_id del catálogo colectivo."
+            )
+
+        for group in catalog.get("groups", []):
+            group_document_ids = tuple(
+                str(document_id)
+                for document_id in group.get(
+                    "model_reference",
+                    {},
+                ).get("document_ids", [])
+                if str(document_id)
+            )
+            traceability_document_ids = tuple(
+                str(document_id)
+                for document_id in group.get(
+                    "traceability",
+                    {},
+                ).get("document_ids", [])
+                if str(document_id)
+            )
+            if group_document_ids != traceability_document_ids:
+                raise RuntimeError(
+                    "La trazabilidad del grupo comparable no coincide "
+                    "con su referencia documental."
+                )
+
+        return catalog
 
     def _run_classification(
         self,

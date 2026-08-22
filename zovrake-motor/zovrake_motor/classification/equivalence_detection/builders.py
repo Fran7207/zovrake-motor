@@ -99,6 +99,20 @@ def build_equivalence_catalog(
     context_association_prepared: bool,
     comparative_domain_model_prepared: bool,
 ) -> EquivalenceCatalog:
+    document_ids = tuple(
+        dict.fromkeys(
+            document_id
+            for equivalence in equivalences
+            for document_id in equivalence.traceability.document_ids
+            if document_id
+        )
+    )
+
+    if not document_ids:
+        document_ids = (
+            catalog_view.document_id,
+        )
+
     return EquivalenceCatalog(
         catalog_id=f"ede-catalog://{catalog_view.model_id}",
         process_id=catalog_view.process_id,
@@ -106,6 +120,7 @@ def build_equivalence_catalog(
         document_id=catalog_view.document_id,
         source_normalized_catalog_id=catalog_view.catalog_id,
         equivalences=equivalences,
+        document_ids=document_ids,
         comparable_group_builder_prepared=comparable_group_builder_prepared,
         context_association_prepared=context_association_prepared,
         comparative_domain_model_prepared=comparative_domain_model_prepared,

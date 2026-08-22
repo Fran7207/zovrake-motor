@@ -98,6 +98,7 @@ class EquivalenceCatalog:
     document_id: str
     source_normalized_catalog_id: str
     equivalences: tuple[EquivalenceRecord, ...]
+    document_ids: tuple[str, ...] = ()
     comparable_group_builder_prepared: bool = True
     context_association_prepared: bool = True
     comparative_domain_model_prepared: bool = True
@@ -108,6 +109,7 @@ class EquivalenceCatalog:
             "process_id": str(self.process_id),
             "model_id": self.model_id,
             "document_id": self.document_id,
+            "document_ids": list(self.document_ids),
             "source_normalized_catalog_id": self.source_normalized_catalog_id,
             "equivalences": [
                 equivalence.to_dict()
