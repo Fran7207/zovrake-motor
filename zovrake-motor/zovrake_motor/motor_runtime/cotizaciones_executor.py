@@ -209,6 +209,7 @@ class CotizacionesAnalysisExecutor:
             domain_catalog=domain_catalog,
             provider_ids=provider_ids,
             documents=documents,
+            provider_source_map=provider_source_map,
         )
         analysis_catalog = self._run_intelligent_analysis(
             process_id=process_id,
@@ -1128,6 +1129,7 @@ class CotizacionesAnalysisExecutor:
         domain_catalog: dict[str, Any],
         provider_ids: tuple[str, ...],
         documents: tuple[ResolvedDocumentContent, ...],
+        provider_source_map: list[dict[str, Any]],
     ) -> dict[str, Any]:
         structure_result = self._comparative_tables.build_comparative_structure(
             ComparativeStructureBuildRequest(
@@ -1196,6 +1198,14 @@ class CotizacionesAnalysisExecutor:
             ),
         )
         definitive_catalog = model_result.catalog.to_dict()
+
+        definitive_catalog = (
+            self._inject_provider_source_map_into_definitive_catalog(
+                definitive_catalog=definitive_catalog,
+                provider_source_map=provider_source_map,
+            )
+        )
+
         validation_result = self._comparative_tables.validate_comparative_model(
             ComparativeModelValidationRequest(
                 process_id=process_id,
@@ -1210,7 +1220,90 @@ class CotizacionesAnalysisExecutor:
                 pipeline_snapshot=self._comparative_tables.get_comparative_tables_pipeline_snapshot(),
             ),
         )
-        return self._fill_cell_values_from_documents(definitive_catalog, documents)
+        definitive_catalog = self._fill_cell_values_from_documents(
+            definitive_catalog,
+            documents,
+        )
+
+        return definitive_catalog
+
+    @staticmethod
+    def _inject_provider_source_map_into_definitive_catalog(
+        *,
+        definitive_catalog: dict[str, Any],
+        provider_source_map: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        catalog = copy.deepcopy(definitive_catalog)
+
+        normalized_map = []
+        seen_provider_ids: set[str] = set()
+
+        for entry in provider_source_map:
+            provider_id = str(entry.get("provider_id", "")).strip()
+            provider_name = str(entry.get("provider_name", "")).strip()
+
+            document_ids = tuple(
+                dict.fromkeys(
+                    str(document_id).strip()
+                    for document_id in entry.get("document_ids", [])
+                    if str(document_id).strip()
+                )
+            )
+
+            if not provider_id or provider_id in seen_provider_ids:
+                continue
+
+            seen_provider_ids.add(provider_id)
+            normalized_map.append(
+                {
+                    "provider_id": provider_id,
+                    "provider_name": provider_name,
+                    "document_ids": list(document_ids),
+                    "document_count": len(document_ids),
+                    "duplicate_document_source": len(document_ids) > 1,
+                }
+            )
+
+        catalog["provider_source_map"] = normalized_map
+        catalog["provider_source_map_count"] = len(normalized_map)
+
+        for model in catalog.get("models", []):
+            metadata = dict(model.get("metadata", {}))
+            metadata["provider_source_map"] = copy.deepcopy(normalized_map)
+            model["metadata"] = metadata
+
+            for row in model.get("dynamic_rows", []):
+                row_metadata = dict(row.get("metadata", {}))
+                provider_id = str(
+                    row.get("provider_id", "")
+                ).strip()
+
+                source_entry = next(
+                    (
+                        entry
+                        for entry in normalized_map
+                        if entry["provider_id"] == provider_id
+                    ),
+                    None,
+                )
+
+                if source_entry is not None:
+                    row_metadata["provider_source_document_ids"] = list(
+                        source_entry["document_ids"]
+                    )
+                    row_metadata["provider_source_document_count"] = (
+                        source_entry["document_count"]
+                    )
+                    row_metadata["provider_source_ambiguous"] = (
+                        source_entry["duplicate_document_source"]
+                    )
+                    row_metadata["provider_name"] = source_entry[
+                        "provider_name"
+                    ]
+
+                row["metadata"] = row_metadata
+
+        return catalog
 
     def _run_intelligent_analysis(
         self,
