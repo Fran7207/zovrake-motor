@@ -66,6 +66,7 @@ class DefinitiveComparativeModel:
     integrity_status: str
     source_data_preserved: bool = True
     domain_model_preserved: bool = True
+    document_ids: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -89,6 +90,7 @@ class DefinitiveComparativeModel:
             "integrity_status": self.integrity_status,
             "source_data_preserved": self.source_data_preserved,
             "domain_model_preserved": self.domain_model_preserved,
+            "document_ids": list(self.document_ids),
         }
 
 
@@ -118,6 +120,7 @@ class DefinitiveComparativeModelCatalog:
     integrity_report_preserved: bool = True
     domain_model_preserved: bool = True
     source_data_preserved: bool = True
+    document_ids: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -145,6 +148,7 @@ class DefinitiveComparativeModelCatalog:
             "provider_catalog_preserved": self.provider_catalog_preserved,
             "integrity_report_preserved": self.integrity_report_preserved,
             "domain_model_preserved": self.domain_model_preserved,
+            "document_ids": list(self.document_ids),
             "source_data_preserved": self.source_data_preserved,
         }
 

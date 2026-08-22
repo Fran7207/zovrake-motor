@@ -45,6 +45,7 @@ class DefinitiveComparativeModelCatalogView:
     process_id: UUID
     model_id: str
     document_id: str
+    document_ids: tuple[str, ...]
     models: tuple[DefinitiveComparativeModelView, ...]
     pm6_definitive_output_contract: bool
     pm7_input_contract_prepared: bool
@@ -139,11 +140,31 @@ class DefinitiveComparativeModelCatalogGateway:
 
         models = tuple(_parse_model(item) for item in models_raw)
 
+        document_ids = tuple(
+            dict.fromkeys(
+                str(document_id)
+                for document_id in catalog_dict.get("document_ids", [])
+                if str(document_id)
+            )
+        )
+        if not document_ids:
+            document_ids = tuple(
+                dict.fromkeys(
+                    str(document_id)
+                    for model in models
+                    for document_id in model.traceability.get("document_ids", [])
+                    if str(document_id)
+                )
+            )
+        if not document_ids and catalog_dict.get("document_id"):
+            document_ids = (str(catalog_dict["document_id"]),)
+
         return DefinitiveComparativeModelCatalogView(
             catalog_id=str(catalog_dict["catalog_id"]),
             process_id=UUID(str(catalog_dict["process_id"])),
             model_id=str(catalog_dict["model_id"]),
             document_id=str(catalog_dict["document_id"]),
+            document_ids=document_ids,
             models=models,
             pm6_definitive_output_contract=True,
             pm7_input_contract_prepared=True,

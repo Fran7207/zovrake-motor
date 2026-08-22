@@ -20,6 +20,7 @@ class DefinitiveComparativeModelReference:
     model_id: str
     document_id: str
     process_id: str
+    document_ids: tuple[str, ...] = ()
     contract_version: str = "1.0"
     pm6_definitive_output_contract: bool = True
     pm7_input_contract_prepared: bool = True
@@ -32,6 +33,7 @@ class DefinitiveComparativeModelReference:
             "model_id": self.model_id,
             "document_id": self.document_id,
             "process_id": self.process_id,
+            "document_ids": list(self.document_ids),
             "contract_version": self.contract_version,
             "pm6_definitive_output_contract": self.pm6_definitive_output_contract,
             "pm7_input_contract_prepared": self.pm7_input_contract_prepared,

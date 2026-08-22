@@ -66,6 +66,49 @@ def _extract_provider_technical_fields(
     return tuple(result)
 
 
+def _resolve_document_ids(
+    *,
+    enriched_table: EnrichedTableView,
+    provider_set: ProviderSetView | None,
+) -> tuple[str, ...]:
+    """Recupera todos los documentos origen sin colapsarlos en uno solo."""
+    document_ids: list[str] = []
+
+    def add_many(values: Any) -> None:
+        if isinstance(values, (list, tuple, set)):
+            for value in values:
+                text = str(value).strip()
+                if text and text not in document_ids:
+                    document_ids.append(text)
+        elif values:
+            text = str(values).strip()
+            if text and text not in document_ids:
+                document_ids.append(text)
+
+    traceability = dict(enriched_table.traceability)
+    add_many(traceability.get("document_ids", []))
+
+    lineage = traceability.get("lineage", {})
+    if isinstance(lineage, dict):
+        add_many(lineage.get("document_ids", []))
+        comparable_group = lineage.get("comparable_group", {})
+        if isinstance(comparable_group, dict):
+            add_many(comparable_group.get("document_ids", []))
+
+    if provider_set is not None:
+        for provider in provider_set.providers:
+            provider_traceability = provider.get("traceability", {})
+            if isinstance(provider_traceability, dict):
+                add_many(provider_traceability.get("document_ids", []))
+                if provider_traceability.get("document_id"):
+                    add_many(provider_traceability.get("document_id"))
+
+    if not document_ids and traceability.get("document_id"):
+        add_many(traceability.get("document_id"))
+
+    return tuple(document_ids)
+
+
 def build_definitive_model(
     *,
     enriched_table: EnrichedTableView,
@@ -82,6 +125,10 @@ def build_definitive_model(
     providers = provider_set.providers if provider_set is not None else ()
     columns = column_set.columns if column_set is not None else ()
     rows = row_set.rows if row_set is not None else ()
+    document_ids = _resolve_document_ids(
+        enriched_table=enriched_table,
+        provider_set=provider_set,
+    )
 
     group_commercial = _extract_group_commercial(structure)
     group_technical_fields, group_specs = _extract_group_technical(structure)
@@ -134,6 +181,7 @@ def build_definitive_model(
         integrity_status=integrity_status,
         source_data_preserved=True,
         domain_model_preserved=input_view.structure_catalog.domain_model_preserved,
+        document_ids=document_ids,
     )
 
 
@@ -143,6 +191,17 @@ def build_definitive_catalog(
     models: tuple[DefinitiveComparativeModel, ...],
     settings: ComparativeModelBuilderSettings,
 ) -> DefinitiveComparativeModelCatalog:
+    document_ids = tuple(
+        dict.fromkeys(
+            document_id
+            for model in models
+            for document_id in model.document_ids
+            if document_id
+        )
+    )
+    if not document_ids and input_view.enriched_catalog.document_id:
+        document_ids = (input_view.enriched_catalog.document_id,)
+
     return DefinitiveComparativeModelCatalog(
         catalog_id=f"cmb-catalog://{input_view.enriched_catalog.model_id}",
         process_id=input_view.enriched_catalog.process_id,
@@ -155,6 +214,7 @@ def build_definitive_catalog(
         source_provider_catalog_id=input_view.provider_catalog.catalog_id,
         source_integrity_report_id=input_view.integrity_report.report_id,
         models=models,
+        document_ids=document_ids,
         pm6_definitive_output_contract=True,
         pm7_input_contract_prepared=PM7_INPUT_CONTRACT_PREPARED,
         comparative_validation_framework_prepared=(

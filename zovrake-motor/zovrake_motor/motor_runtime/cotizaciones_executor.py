@@ -1344,8 +1344,23 @@ class CotizacionesAnalysisExecutor:
         documents: tuple[ResolvedDocumentContent, ...],
     ) -> dict[str, Any]:
         catalog = copy.deepcopy(definitive_catalog)
+        by_document_id = {
+            doc.document_id: doc
+            for doc in documents
+            if doc.document_id
+        }
+        provider_name_counts: dict[str, int] = {}
+        provider_name_map: dict[str, ResolvedDocumentContent] = {}
+        for doc in documents:
+            provider_name = (doc.provider_name or "").strip()
+            if not provider_name:
+                continue
+            provider_name_counts[provider_name] = provider_name_counts.get(provider_name, 0) + 1
+            provider_name_map[provider_name] = doc
         by_provider = {
-            (doc.provider_name or doc.document_id): doc for doc in documents
+            name: document
+            for name, document in provider_name_map.items()
+            if provider_name_counts.get(name, 0) == 1
         }
         for model in catalog.get("models", []):
             rows = list(model.get("dynamic_rows", []))
@@ -1357,7 +1372,9 @@ class CotizacionesAnalysisExecutor:
             enriched_rows = []
             for row in rows:
                 provider_id = str(row.get("provider_id", ""))
-                document = by_provider.get(provider_id)
+                document = by_document_id.get(provider_id)
+                if document is None:
+                    document = by_provider.get(provider_id)
                 cells = []
                 for cell in row.get("cells_reserved", []):
                     cell_copy = dict(cell)
