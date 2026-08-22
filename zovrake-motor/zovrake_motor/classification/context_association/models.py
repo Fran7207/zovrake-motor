@@ -61,11 +61,13 @@ class ContextAssociationTraceability:
     canonical_reference: str
     original_preserved: bool
     context_preserved: bool
+    document_ids: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "process_id": str(self.process_id),
             "document_id": self.document_id,
+            "document_ids": list(self.document_ids),
             "model_id": self.model_id,
             "source_comparable_group_catalog_id": self.source_comparable_group_catalog_id,
             "group_id": self.group_id,
@@ -115,6 +117,7 @@ class ContextAssociationCatalog:
     preserved_context: PreservedIntegratedContext
     preserved_groups: tuple[dict[str, Any], ...]
     associations: tuple[ContextAssociationRecord, ...]
+    document_ids: tuple[str, ...] = ()
     comparable_group_catalog_preserved: bool = True
     context_preserved: bool = True
     comparative_domain_model_prepared: bool = True
@@ -125,6 +128,7 @@ class ContextAssociationCatalog:
             "process_id": str(self.process_id),
             "model_id": self.model_id,
             "document_id": self.document_id,
+            "document_ids": list(self.document_ids),
             "source_comparable_group_catalog_id": self.source_comparable_group_catalog_id,
             "preserved_context": self.preserved_context.to_dict(),
             "preserved_groups": list(self.preserved_groups),

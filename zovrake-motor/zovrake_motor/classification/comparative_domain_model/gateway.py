@@ -23,6 +23,7 @@ class ContextAssociationCatalogView:
     process_id: UUID
     model_id: str
     document_id: str
+    document_ids: tuple[str, ...]
     source_comparable_group_catalog_id: str
     preserved_context: PreservedIntegratedContext
     preserved_groups: tuple[dict[str, Any], ...]
@@ -56,6 +57,7 @@ def _parse_association(payload: dict[str, Any]) -> ContextAssociationRecord:
             canonical_reference=str(traceability_raw.get("canonical_reference", "")),
             original_preserved=bool(traceability_raw.get("original_preserved", True)),
             context_preserved=bool(traceability_raw.get("context_preserved", True)),
+            document_ids=tuple(traceability_raw.get("document_ids", [])),
         ),
         metadata=dict(payload.get("metadata", {})),
     )
@@ -124,11 +126,31 @@ class ContextAssociationCatalogGateway:
 
         associations = tuple(_parse_association(item) for item in associations_raw)
 
+        document_ids = tuple(
+            dict.fromkeys(
+                str(document_id)
+                for document_id in catalog_dict.get("document_ids", [])
+                if str(document_id)
+            )
+        )
+        if not document_ids:
+            document_ids = tuple(
+                dict.fromkeys(
+                    str(document_id)
+                    for association in associations
+                    for document_id in association.traceability.document_ids
+                    if str(document_id)
+                )
+            )
+        if not document_ids and catalog_dict.get("document_id"):
+            document_ids = (str(catalog_dict["document_id"]),)
+
         return ContextAssociationCatalogView(
             catalog_id=str(catalog_dict["catalog_id"]),
             process_id=UUID(str(catalog_dict["process_id"])),
             model_id=str(catalog_dict["model_id"]),
             document_id=str(catalog_dict["document_id"]),
+            document_ids=document_ids,
             source_comparable_group_catalog_id=str(
                 catalog_dict.get("source_comparable_group_catalog_id", ""),
             ),

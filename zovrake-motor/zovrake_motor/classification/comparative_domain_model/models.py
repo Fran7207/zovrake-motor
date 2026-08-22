@@ -69,11 +69,13 @@ class ComparativeDomainTraceability:
     canonical_reference: str
     original_preserved: bool
     context_preserved: bool
+    document_ids: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "process_id": str(self.process_id),
             "document_id": self.document_id,
+            "document_ids": list(self.document_ids),
             "model_id": self.model_id,
             "source_context_association_catalog_id": self.source_context_association_catalog_id,
             "source_comparable_group_catalog_id": self.source_comparable_group_catalog_id,
@@ -145,6 +147,7 @@ class ComparativeDomainModelCatalog:
     document_id: str
     source_context_association_catalog_id: str
     models: tuple[ComparativeDomainModelRecord, ...]
+    document_ids: tuple[str, ...] = ()
     pm6_output_contract: bool = True
     source_data_preserved: bool = True
 
@@ -154,6 +157,7 @@ class ComparativeDomainModelCatalog:
             "process_id": str(self.process_id),
             "model_id": self.model_id,
             "document_id": self.document_id,
+            "document_ids": list(self.document_ids),
             "source_context_association_catalog_id": self.source_context_association_catalog_id,
             "models": [model.to_dict() for model in self.models],
             "models_count": len(self.models),

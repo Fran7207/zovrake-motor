@@ -48,6 +48,16 @@ def build_context_association_record(
             canonical_reference=str(traceability_raw.get("canonical_reference", "")),
             original_preserved=bool(traceability_raw.get("original_preserved", True)),
             context_preserved=True,
+            document_ids=tuple(
+                dict.fromkeys(
+                    str(document_id)
+                    for document_id in (
+                        *traceability_raw.get("document_ids", []),
+                        *group.get("model_reference", {}).get("document_ids", []),
+                    )
+                    if str(document_id)
+                )
+            ),
         ),
         metadata={
             "associator_strategy": "uniform_group_context",
@@ -73,6 +83,7 @@ def build_context_association_catalog(
         preserved_context=preserved_context,
         preserved_groups=input_view.group_catalog.groups,
         associations=associations,
+        document_ids=input_view.group_catalog.document_ids,
         comparable_group_catalog_preserved=True,
         context_preserved=True,
         comparative_domain_model_prepared=comparative_domain_model_prepared,

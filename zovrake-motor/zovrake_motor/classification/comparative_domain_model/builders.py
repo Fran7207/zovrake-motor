@@ -92,6 +92,16 @@ def build_comparative_domain_model_record(
             canonical_reference=str(traceability_raw.get("canonical_reference", "")),
             original_preserved=bool(traceability_raw.get("original_preserved", True)),
             context_preserved=True,
+            document_ids=tuple(
+                dict.fromkeys(
+                    str(document_id)
+                    for document_id in (
+                        *traceability_raw.get("document_ids", []),
+                        *group.get("model_reference", {}).get("document_ids", []),
+                    )
+                    if str(document_id)
+                )
+            ),
         ),
         status=ComparativeDomainModelBuildStatus.BUILT,
         metadata={
@@ -115,6 +125,7 @@ def build_comparative_domain_model_catalog(
         document_id=catalog_view.document_id,
         source_context_association_catalog_id=catalog_view.catalog_id,
         models=models,
+        document_ids=catalog_view.document_ids,
         pm6_output_contract=pm6_output_contract,
         source_data_preserved=True,
     )

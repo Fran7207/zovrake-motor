@@ -22,6 +22,7 @@ class ComparableGroupCatalogView:
     model_id: str
     document_id: str
     groups: tuple[dict[str, Any], ...]
+    document_ids: tuple[str, ...]
     raw_catalog: dict[str, Any]
 
 
@@ -111,12 +112,35 @@ class ContextAssociationGateway:
         if not isinstance(groups_raw, list):
             raise ComparableGroupCatalogAccessError("groups debe ser una lista")
 
+        document_ids = tuple(
+            dict.fromkeys(
+                str(document_id)
+                for document_id in catalog_dict.get("document_ids", [])
+                if str(document_id)
+            )
+        )
+        if not document_ids:
+            document_ids = tuple(
+                dict.fromkeys(
+                    str(document_id)
+                    for group in groups_raw
+                    for document_id in (
+                        *group.get("model_reference", {}).get("document_ids", []),
+                        *group.get("traceability", {}).get("document_ids", []),
+                    )
+                    if str(document_id)
+                )
+            )
+        if not document_ids and catalog_dict.get("document_id"):
+            document_ids = (str(catalog_dict["document_id"]),)
+
         return ComparableGroupCatalogView(
             catalog_id=str(catalog_dict["catalog_id"]),
             process_id=UUID(str(catalog_dict["process_id"])),
             model_id=str(catalog_dict["model_id"]),
             document_id=str(catalog_dict["document_id"]),
             groups=tuple(dict(group) for group in groups_raw),
+            document_ids=document_ids,
             raw_catalog=catalog_dict,
         )
 
