@@ -698,6 +698,7 @@ class CotizacionesAnalysisExecutor:
             "source_data_preserved": True,
         }
 
+    @staticmethod
     def _build_document_classification_snapshot(
         *,
         process_id: UUID,
