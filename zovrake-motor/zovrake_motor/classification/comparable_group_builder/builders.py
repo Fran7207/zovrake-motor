@@ -120,14 +120,20 @@ def build_comparable_group_record(
     concept_ids: set[str] = set()
     equivalence_ids: set[str] = set()
     provider_references: set[str] = set()
+    document_ids: set[str] = set()
     specifications: set[str] = set()
 
     for relation in relations:
         equivalence_ids.add(relation.equivalence_id)
         concept_ids.update(relation.traceability.concept_ids)
+        document_ids.update(relation.traceability.document_ids)
+        if not relation.traceability.document_ids and relation.traceability.document_id:
+            document_ids.add(relation.traceability.document_id)
         if relation.traceability.document_reference:
             provider_references.add(relation.traceability.document_reference)
 
+    sorted_document_ids = tuple(sorted(document_ids))
+    primary_document_id = sorted_document_ids[0] if sorted_document_ids else catalog_view.document_id
     concept_type = _concept_type_from_relations(relations, normalized_concept_ids[0])
     first_relation = relations[0]
 
@@ -151,13 +157,14 @@ def build_comparable_group_record(
         ),
         model_reference=ComparableGroupModelReference(
             model_id=catalog_view.model_id,
-            document_id=catalog_view.document_id,
+            document_id=primary_document_id,
             concept_ids=tuple(sorted(concept_ids)),
             normalized_concept_ids=normalized_concept_ids,
+            document_ids=sorted_document_ids,
         ),
         traceability=ComparableGroupTraceability(
             process_id=catalog_view.process_id,
-            document_id=catalog_view.document_id,
+            document_id=primary_document_id,
             model_id=catalog_view.model_id,
             source_equivalence_catalog_id=catalog_view.catalog_id,
             source_normalized_catalog_id=catalog_view.source_normalized_catalog_id,
@@ -167,12 +174,15 @@ def build_comparable_group_record(
             document_reference=first_relation.traceability.document_reference,
             canonical_reference=first_relation.traceability.canonical_reference,
             original_preserved=first_relation.traceability.original_preserved,
+            document_ids=sorted_document_ids,
         ),
         status=ComparableGroupBuildStatus.BUILT,
         metadata={
             "group_id_prefix": settings.group_id_prefix,
             "group_id_immutable": settings.group_id_immutable,
             "members_count": len(normalized_concept_ids),
+            "document_count": len(sorted_document_ids),
+            "cross_document_group": len(sorted_document_ids) > 1,
         },
     )
 
@@ -188,8 +198,13 @@ def build_comparable_group_catalog(
         catalog_id=f"cgb-catalog://{catalog_view.model_id}",
         process_id=catalog_view.process_id,
         model_id=catalog_view.model_id,
-        document_id=catalog_view.document_id,
+        document_id=(
+            catalog_view.document_id
+            if not getattr(catalog_view, "document_ids", ())
+            else sorted(catalog_view.document_ids)[0]
+        ),
         source_equivalence_catalog_id=catalog_view.catalog_id,
+        document_ids=tuple(getattr(catalog_view, "document_ids", ())) or (catalog_view.document_id,),
         groups=groups,
         context_association_prepared=context_association_prepared,
         comparative_domain_model_prepared=comparative_domain_model_prepared,

@@ -41,6 +41,7 @@ class ComparableGroupModelReference:
     document_id: str
     concept_ids: tuple[str, ...]
     normalized_concept_ids: tuple[str, ...]
+    document_ids: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -48,6 +49,7 @@ class ComparableGroupModelReference:
             "document_id": self.document_id,
             "concept_ids": list(self.concept_ids),
             "normalized_concept_ids": list(self.normalized_concept_ids),
+            "document_ids": list(self.document_ids),
         }
 
 
@@ -66,11 +68,13 @@ class ComparableGroupTraceability:
     document_reference: str
     canonical_reference: str
     original_preserved: bool
+    document_ids: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "process_id": str(self.process_id),
             "document_id": self.document_id,
+            "document_ids": list(self.document_ids),
             "model_id": self.model_id,
             "source_equivalence_catalog_id": self.source_equivalence_catalog_id,
             "source_normalized_catalog_id": self.source_normalized_catalog_id,
@@ -129,6 +133,7 @@ class ComparableGroupCatalog:
     document_id: str
     source_equivalence_catalog_id: str
     groups: tuple[ComparableGroupRecord, ...]
+    document_ids: tuple[str, ...] = ()
     context_association_prepared: bool = True
     comparative_domain_model_prepared: bool = True
 
@@ -138,6 +143,7 @@ class ComparableGroupCatalog:
             "process_id": str(self.process_id),
             "model_id": self.model_id,
             "document_id": self.document_id,
+            "document_ids": list(self.document_ids),
             "source_equivalence_catalog_id": self.source_equivalence_catalog_id,
             "groups": [group.to_dict() for group in self.groups],
             "groups_count": len(self.groups),

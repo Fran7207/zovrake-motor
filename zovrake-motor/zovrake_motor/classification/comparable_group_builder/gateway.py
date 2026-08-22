@@ -28,6 +28,7 @@ class EquivalenceCatalogView:
     equivalences: tuple[EquivalenceRecord, ...]
     equivalent_relations: tuple[EquivalenceRecord, ...]
     raw_catalog: dict[str, Any]
+    document_ids: tuple[str, ...] = ()
 
 
 def _parse_equivalence(payload: dict[str, Any]) -> EquivalenceRecord:
@@ -50,6 +51,7 @@ def _parse_equivalence(payload: dict[str, Any]) -> EquivalenceRecord:
         traceability=EquivalenceTraceability(
             process_id=UUID(str(traceability_raw["process_id"])),
             document_id=str(traceability_raw.get("document_id", "")),
+            document_ids=tuple(traceability_raw.get("document_ids", [])),
             model_id=str(traceability_raw.get("model_id", "")),
             source_normalized_catalog_id=str(traceability_raw.get("source_normalized_catalog_id", "")),
             concept_ids=tuple(traceability_raw.get("concept_ids", [])),
@@ -121,6 +123,20 @@ class EquivalenceCatalogGateway:
             equivalences=equivalences,
             equivalent_relations=equivalent_relations,
             raw_catalog=catalog_dict,
+            document_ids=tuple(catalog_dict.get("document_ids", []))
+            or tuple(
+                sorted(
+                    {
+                        document_id
+                        for equivalence in equivalences
+                        for document_id in (
+                            *equivalence.traceability.document_ids,
+                            equivalence.traceability.document_id,
+                        )
+                        if document_id
+                    }
+                )
+            ),
         )
 
     def snapshot(self) -> dict[str, Any]:
