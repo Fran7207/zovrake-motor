@@ -187,9 +187,16 @@ class CotizacionesAnalysisExecutor:
             )
         )
 
-        domain_catalog = self._build_document_classification_snapshot(
+        collective_context_association_catalog = self._run_collective_context_association(
             process_id=process_id,
-            normalized_catalogs=normalized_catalogs,
+            collective_comparable_group_catalog=collective_comparable_group_catalog,
+            codigo_req=codigo_req,
+            requirement_description=requirement_description,
+        )
+        domain_catalog = self._run_collective_comparative_domain_model(
+            process_id=process_id,
+            collective_context_association_catalog=collective_context_association_catalog,
+            codigo_req=codigo_req,
         )
         provider_ids = tuple(
             doc.provider_name or doc.document_id for doc in documents
@@ -239,7 +246,8 @@ class CotizacionesAnalysisExecutor:
                     "collective_normalization",
                     "collective_equivalence_detection",
                     "collective_comparable_groups",
-                    "classification_snapshot",
+                    "collective_context_association",
+                    "comparative_domain_model",
                     "comparative_tables",
                     "intelligent_analysis",
                 ],
@@ -254,6 +262,18 @@ class CotizacionesAnalysisExecutor:
                     "comparable_group_count": int(
                         collective_comparable_group_catalog.get(
                             "groups_count",
+                            0,
+                        )
+                    ),
+                    "context_association_count": int(
+                        collective_context_association_catalog.get(
+                            "associations_count",
+                            0,
+                        )
+                    ),
+                    "comparative_domain_model_count": int(
+                        domain_catalog.get(
+                            "models_count",
                             0,
                         )
                     ),
@@ -969,6 +989,71 @@ class CotizacionesAnalysisExecutor:
                     "con su referencia documental."
                 )
 
+        return catalog
+
+    def _run_collective_context_association(
+        self,
+        *,
+        process_id: UUID,
+        collective_comparable_group_catalog: dict[str, Any],
+        codigo_req: str,
+        requirement_description: str,
+    ) -> dict[str, Any]:
+        if not collective_comparable_group_catalog:
+            raise ValueError("El catálogo colectivo de grupos comparables no puede estar vacío.")
+
+        result = self._classification.associate_context(
+            ContextAssociationRequest(
+                process_id=process_id,
+                comparable_group_catalog=copy.deepcopy(collective_comparable_group_catalog),
+                integrated_context={
+                    "context_id": f"ctx://{process_id}",
+                    "description": requirement_description or codigo_req,
+                    "process_id": str(process_id),
+                    "codigo_req": codigo_req,
+                    "immutable": True,
+                },
+                codigo_req=codigo_req,
+                metadata={
+                    "scope": "collective_multi_document",
+                    "document_ids": list(collective_comparable_group_catalog.get("document_ids", [])),
+                },
+            ),
+        )
+        catalog = result.catalog.to_dict()
+        expected = tuple(collective_comparable_group_catalog.get("document_ids", []))
+        actual = tuple(catalog.get("document_ids", []))
+        if actual != expected:
+            raise RuntimeError("CAE no preservó document_ids del catálogo colectivo.")
+        return catalog
+
+    def _run_collective_comparative_domain_model(
+        self,
+        *,
+        process_id: UUID,
+        collective_context_association_catalog: dict[str, Any],
+        codigo_req: str,
+    ) -> dict[str, Any]:
+        result = self._classification.build_comparative_domain_model(
+            ComparativeDomainModelBuildRequest(
+                process_id=process_id,
+                context_association_catalog=copy.deepcopy(collective_context_association_catalog),
+                codigo_req=codigo_req,
+                metadata={
+                    "scope": "collective_multi_document",
+                    "document_ids": list(collective_context_association_catalog.get("document_ids", [])),
+                },
+            ),
+        )
+        catalog = result.catalog.to_dict()
+        expected = tuple(collective_context_association_catalog.get("document_ids", []))
+        actual = tuple(catalog.get("document_ids", []))
+        if actual != expected:
+            raise RuntimeError("CDMB no preservó document_ids del catálogo colectivo.")
+        for model in catalog.get("models", []):
+            model_doc_ids = tuple(model.get("traceability", {}).get("document_ids", []))
+            if model_doc_ids != expected:
+                raise RuntimeError("CDMB perdió la trazabilidad documental del modelo.")
         return catalog
 
     def _run_classification(
