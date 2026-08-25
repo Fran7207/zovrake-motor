@@ -29,13 +29,69 @@ class PdfImage:
 
 
 @dataclass(frozen=True)
+class PdfTableColumn:
+    """Columna semántica identificada dentro de una tabla PDF."""
+
+    key: str
+    label: str
+    index: int
+    confidence: float = 0.0
+    evidence: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "key": self.key,
+            "label": self.label,
+            "index": self.index,
+            "confidence": self.confidence,
+            "evidence": list(self.evidence),
+        }
+
+
+@dataclass(frozen=True)
+class PdfSemanticTable:
+    """
+    Representación semántica de una tabla PDF.
+
+    La estructura se descubre a partir del contenido real del documento.
+    No representa una plantilla fija de cotización.
+    """
+
+    table_id: str
+    columns: tuple[PdfTableColumn, ...] = ()
+    rows: tuple[dict[str, Any], ...] = ()
+    confidence: float = 0.0
+    source_table_id: str = ""
+    source_page_number: int | None = None
+    evidence: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "table_id": self.table_id,
+            "columns": [
+                column.to_dict()
+                for column in self.columns
+            ],
+            "rows": [
+                dict(row)
+                for row in self.rows
+            ],
+            "confidence": self.confidence,
+            "source_table_id": self.source_table_id,
+            "source_page_number": self.source_page_number,
+            "evidence": list(self.evidence),
+        }
+
+
+@dataclass(frozen=True)
 class PdfTable:
-    """Tabla detectada dentro de una página PDF."""
+    """Tabla física detectada dentro de una página PDF."""
 
     table_id: str
     page_number: int
     rows: tuple[tuple[str, ...], ...] = ()
     bbox: tuple[float, float, float, float] | None = None
+    semantic: PdfSemanticTable | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -43,6 +99,11 @@ class PdfTable:
             "page_number": self.page_number,
             "rows": [list(row) for row in self.rows],
             "bbox": list(self.bbox) if self.bbox else None,
+            "semantic": (
+                self.semantic.to_dict()
+                if self.semantic is not None
+                else None
+            ),
         }
 
 
@@ -74,6 +135,7 @@ class PdfPageAnalysis:
     text: str
     text_blocks: tuple[PdfTextBlock, ...] = ()
     tables: tuple[PdfTable, ...] = ()
+    semantic_tables: tuple[PdfSemanticTable, ...] = ()
     images: tuple[PdfImage, ...] = ()
     has_text: bool = False
     has_tables: bool = False
@@ -90,8 +152,13 @@ class PdfPageAnalysis:
             "text_blocks": [
                 block.to_dict() for block in self.text_blocks
             ],
-            "tables": [
-                table.to_dict() for table in self.tables
+             "tables": [
+                table.to_dict()
+                for table in self.tables
+            ],
+            "semantic_tables": [
+                table.to_dict()
+                for table in self.semantic_tables
             ],
             "images": [
                 image.to_dict() for image in self.images
@@ -114,7 +181,8 @@ class ProcessedPdfDocument:
     pages: tuple[PdfPageAnalysis, ...]
     full_text: str
     tables: tuple[PdfTable, ...]
-    images: tuple[PdfImage, ...]
+    semantic_tables: tuple[PdfSemanticTable, ...] = ()
+    images: tuple[PdfImage, ...] = ()
     pdf_metadata: dict[str, Any] = field(default_factory=dict)
     ocr_required: bool = False
     extraction_method: str = "native_pdf"
@@ -147,7 +215,12 @@ class ProcessedPdfDocument:
             ],
             "full_text": self.full_text,
             "tables": [
-                table.to_dict() for table in self.tables
+                table.to_dict()
+                for table in self.tables
+            ],
+            "semantic_tables": [
+                table.to_dict()
+                for table in self.semantic_tables
             ],
             "images": [
                 image.to_dict() for image in self.images
