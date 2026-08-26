@@ -379,6 +379,13 @@ class PDFDocumentProcessor:
                 selected_semantics=selected_semantics,
             )
 
+            selected_semantics = (
+                PDFDocumentProcessor._synchronize_selected_semantics(
+                    tables=enriched_tables,
+                    selected_semantics=selected_semantics,
+                )
+            )
+
         return enriched_tables, selected_semantics
 
     @staticmethod
@@ -499,6 +506,18 @@ class PDFDocumentProcessor:
         tables: list[PdfTable],
         selected_semantics: list[PdfSemanticTable],
     ) -> list[PdfTable]:
+        """
+        Vincula una semántica seleccionada con una tabla física solamente
+        cuando existe evidencia suficiente para demostrar la relación.
+
+        Una semántica obtenida exclusivamente mediante layout puede
+        permanecer sin ``source_table_id``. Eso no es un error: significa
+        que el motor comprendió una estructura visual que el extractor
+        físico no pudo representar como la misma tabla.
+
+        Nunca se asigna una tabla física por posición, orden o proximidad
+        solamente.
+        """
         result: list[PdfTable] = []
 
         for table in tables:
@@ -513,6 +532,7 @@ class PDFDocumentProcessor:
                     exact,
                     key=lambda item: item.confidence,
                 )
+
                 result.append(
                     replace(
                         table,
@@ -521,22 +541,35 @@ class PDFDocumentProcessor:
                 )
                 continue
 
-            # Una semántica producida por layout puede reemplazar una
-            # semántica física débil cuando representa la misma tabla.
-            candidates = [
-                semantic
-                for semantic in selected_semantics
-                if semantic.source_page_number == table.page_number
-                and PDFDocumentProcessor._semantic_matches_table(
-                    table,
-                    semantic,
+            candidates: list[
+                tuple[float, PdfSemanticTable]
+            ] = []
+
+            for semantic in selected_semantics:
+                if (
+                    semantic.source_table_id
+                    or semantic.source_page_number
+                    != table.page_number
+                ):
+                    continue
+
+                score = PDFDocumentProcessor._semantic_table_match_score(
+                    table=table,
+                    semantic=semantic,
                 )
-            ]
+
+                if score >= 0.60:
+                    candidates.append(
+                        (score, semantic)
+                    )
 
             if candidates:
-                semantic = max(
+                _, semantic = max(
                     candidates,
-                    key=lambda item: item.confidence,
+                    key=lambda item: (
+                        item[0],
+                        item[1].confidence,
+                    ),
                 )
 
                 traced = replace(
@@ -544,6 +577,15 @@ class PDFDocumentProcessor:
                     table_id=f"{table.table_id}-semantic",
                     source_table_id=table.table_id,
                     source_page_number=table.page_number,
+                    evidence=tuple(
+                        dict.fromkeys(
+                            (
+                                *semantic.evidence,
+                                f"source_table:{table.table_id}",
+                                "source_resolution:physical_match",
+                            )
+                        )
+                    ),
                 )
 
                 result.append(
@@ -554,70 +596,195 @@ class PDFDocumentProcessor:
                 )
                 continue
 
-            # La semántica física que no fue seleccionada debe eliminarse
-            # del objeto final cuando existe una representación de layout
-            # superior pero no podemos demostrar trazabilidad entre ambas.
-            # Es preferible conservar una ausencia explícita antes que
-            # publicar una semántica incorrecta.
-            if table.semantic is not None:
-                result.append(
-                    replace(
-                        table,
-                        semantic=None,
-                    )
+            # No existe evidencia suficiente para relacionar esta tabla
+            # física con una semántica seleccionada. No inventamos la
+            # procedencia.
+            result.append(
+                replace(
+                    table,
+                    semantic=None,
                 )
-            else:
-                result.append(table)
+                if table.semantic is not None
+                else table
+            )
 
         return result
 
     @staticmethod
-    def _semantic_matches_table(
+    def _synchronize_selected_semantics(
+        *,
+        tables: list[PdfTable],
+        selected_semantics: list[PdfSemanticTable],
+    ) -> list[PdfSemanticTable]:
+        """
+        Garantiza que ``ProcessedPdfDocument.semantic_tables`` utilice
+        exactamente la misma representación semántica que fue colocada
+        dentro de ``PdfTable.semantic`` cuando existe una relación física.
+
+        Las semánticas exclusivamente de layout se conservan sin
+        ``source_table_id`` y mantienen su evidencia original.
+        """
+        by_source_table = {
+            table.semantic.source_table_id: table.semantic
+            for table in tables
+            if table.semantic is not None
+            and table.semantic.source_table_id
+        }
+
+        synchronized: list[PdfSemanticTable] = []
+
+        for semantic in selected_semantics:
+            if semantic.source_table_id:
+                canonical = by_source_table.get(
+                    semantic.source_table_id
+                )
+
+                if canonical is not None:
+                    synchronized.append(canonical)
+                    continue
+
+            synchronized.append(semantic)
+
+        unique: dict[str, PdfSemanticTable] = {}
+
+        for semantic in synchronized:
+            unique[semantic.table_id] = semantic
+
+        return sorted(
+            unique.values(),
+            key=lambda item: (
+                item.source_page_number or 0,
+                item.table_id,
+            ),
+        )
+
+    @staticmethod
+    def _semantic_table_match_score(
+        *,
         table: PdfTable,
         semantic: PdfSemanticTable,
-    ) -> bool:
-        """Comprueba si una semántica puede corresponder a una tabla física."""
-        if semantic.source_table_id == table.table_id:
-            return True
+    ) -> float:
+        """
+        Calcula evidencia de correspondencia entre una tabla física y una
+        semántica de layout.
 
+        La puntuación combina:
+        - coincidencia exacta de valores;
+        - cobertura de valores;
+        - compatibilidad del ancho físico;
+        - compatibilidad del número de filas.
+
+        No utiliza únicamente el hecho de estar en la misma página.
+        """
         if semantic.source_page_number != table.page_number:
-            return False
+            return 0.0
 
-        if not semantic.columns or not table.rows:
-            return False
+        if not table.rows or not semantic.rows:
+            return 0.0
 
-        # La tabla física debe tener al menos una fila que contenga
-        # evidencia textual/numerica presente también en la semántica.
         physical_values = {
-            str(value).strip().lower()
+            PDFDocumentProcessor._normalize_evidence_value(value)
             for row in table.rows
             for value in row
             if str(value).strip()
         }
+
         semantic_values = {
-            str(value).strip().lower()
+            PDFDocumentProcessor._normalize_evidence_value(value)
             for row in semantic.rows
             for value in row.values()
             if str(value).strip()
         }
 
-        if not physical_values or not semantic_values:
-            return False
+        physical_values.discard("")
+        semantic_values.discard("")
 
-        common = len(
-            physical_values & semantic_values
+        if not physical_values or not semantic_values:
+            return 0.0
+
+        common_values = physical_values & semantic_values
+
+        if not common_values:
+            return 0.0
+
+        value_precision = len(common_values) / len(semantic_values)
+        value_recall = len(common_values) / len(physical_values)
+
+        value_score = (
+            value_precision * 0.65
+            + value_recall * 0.35
         )
 
-        if common == 0:
-            return False
+        physical_width = max(
+            len(row)
+            for row in table.rows
+        )
 
-        return common / max(
-            min(
-                len(physical_values),
-                len(semantic_values),
+        semantic_width = len(semantic.columns)
+
+        if semantic_width <= 0:
+            return 0.0
+
+        width_distance = abs(
+            physical_width - semantic_width
+        )
+
+        width_score = max(
+            0.0,
+            1.0
+            - (
+                width_distance
+                / max(
+                    physical_width,
+                    semantic_width,
+                    1,
+                )
             ),
-            1,
-        ) >= 0.20
+        )
+
+        physical_row_count = len(table.rows)
+        semantic_row_count = len(semantic.rows)
+
+        row_distance = abs(
+            physical_row_count
+            - semantic_row_count
+        )
+
+        row_score = max(
+            0.0,
+            1.0
+            - (
+                row_distance
+                / max(
+                    physical_row_count,
+                    semantic_row_count,
+                    1,
+                )
+            ),
+        )
+
+        return round(
+            value_score * 0.70
+            + width_score * 0.15
+            + row_score * 0.15,
+            4,
+        )
+
+    @staticmethod
+    def _normalize_evidence_value(
+        value: Any,
+    ) -> str:
+        """
+        Normaliza valores únicamente para comparar evidencia de origen.
+
+        No modifica el valor almacenado en la tabla.
+        """
+        text = str(value).strip().lower()
+
+        if not text:
+            return ""
+
+        return " ".join(text.split())
 
     @classmethod
     def _requires_ocr(
