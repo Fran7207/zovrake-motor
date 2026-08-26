@@ -323,6 +323,7 @@ def _decode_document_content(
     str,
     tuple[dict[str, Any], ...],
     dict[str, Any] | None,
+    tuple[dict[str, Any], ...],
 ]:
     """
     Decodifica y resuelve el contenido documental.
@@ -333,7 +334,7 @@ def _decode_document_content(
         metadata del procesamiento PDF cuando corresponda.
     """
     if not data_url:
-        return "", (), None, (), ()
+        return "", (), None, ()
 
     payload = data_url
     mime = content_type
@@ -366,6 +367,7 @@ def _decode_document_content(
                             "el contenido base64."
                         ],
                     },
+                    (),
                 )
         else:
             return (
@@ -555,7 +557,7 @@ def _decode_document_content(
                     (),
                 )
             except Exception:
-                return "", (), None, (), ()
+                return "", (), None, ()
 
     try:
         return (
