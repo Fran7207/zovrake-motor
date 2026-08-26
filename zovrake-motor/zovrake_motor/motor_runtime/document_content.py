@@ -91,11 +91,13 @@ class ResolvedDocumentContent:
     commercial_total_amount: str
     commercial_payment_terms: str
     metadata: dict[str, Any] = field(default_factory=dict)
+    semantic_tables: tuple[dict[str, Any], ...] = ()
 
     def to_adapter_metadata(self) -> dict[str, Any]:
         return {
             "text_content": self.text_content,
             "tables": list(self.tables),
+            "semantic_tables": list(self.semantic_tables),
             "items": list(self.items),
             "provider_name": self.provider_name,
             "provider_id": self.document_id,
@@ -122,6 +124,7 @@ class ResolvedDocumentContent:
             "text_length": len(self.text_content),
             "items_count": len(self.items),
             "tables_count": len(self.tables),
+            "semantic_tables_count": len(self.semantic_tables),
             "commercial_currency": self.commercial_currency,
             "commercial_total_amount": self.commercial_total_amount,
             "commercial_payment_terms": self.commercial_payment_terms,
@@ -177,6 +180,7 @@ def resolve_evidence_documents(
             text,
             extracted_tables,
             pdf_processing,
+            semantic_tables,
         ) = _decode_document_content(
             data_url=data_url,
             content_type=content_type,
@@ -225,6 +229,7 @@ def resolve_evidence_documents(
                 commercial_currency=currency,
                 commercial_total_amount=total,
                 commercial_payment_terms=payment,
+                semantic_tables=semantic_tables,
                 metadata={
                     "uploaded_at": metadata.get("uploaded_at"),
                     "file_size": metadata.get("file_size"),
@@ -328,7 +333,7 @@ def _decode_document_content(
         metadata del procesamiento PDF cuando corresponda.
     """
     if not data_url:
-        return "", (), None
+        return "", (), None, (), ()
 
     payload = data_url
     mime = content_type
@@ -367,6 +372,7 @@ def _decode_document_content(
                 _clean_text(unquote(payload)),
                 (),
                 None,
+                (),
             )
 
     else:
@@ -405,6 +411,11 @@ def _decode_document_content(
                 for table in processed.tables
             )
 
+            semantic_tables = tuple(
+                table.to_dict()
+                for table in processed.semantic_tables
+            )
+
             processing_metadata = {
                 "status": (
                     "processed"
@@ -417,12 +428,18 @@ def _decode_document_content(
                 "ocr_required": processed.ocr_required,
                 "extraction_method": processed.extraction_method,
                 "tables_count": len(processed.tables),
+                "semantic_tables_count": len(
+                    processed.semantic_tables
+                ),
                 "images_count": len(processed.images),
                 "warnings": list(
                     processed.warnings
                 ),
                 "errors": list(
                     processed.errors
+                ),
+                "semantic_tables": list(
+                    semantic_tables
                 ),
                 "pages": [
                     {
@@ -436,6 +453,13 @@ def _decode_document_content(
                         "tables_count": len(
                             page.tables
                         ),
+                        "semantic_tables_count": len(
+                            page.semantic_tables
+                        ),
+                        "semantic_tables": [
+                            table.to_dict()
+                            for table in page.semantic_tables
+                        ],
                         "images_count": len(
                             page.images
                         ),
@@ -457,6 +481,7 @@ def _decode_document_content(
                 processed.full_text,
                 tables,
                 processing_metadata,
+                semantic_tables,
             )
 
         except PdfProcessingError as exc:
@@ -479,6 +504,7 @@ def _decode_document_content(
                     "errors": [str(exc)],
                     "pages": [],
                 },
+                (),
             )
 
     # ============================================================
@@ -493,6 +519,7 @@ def _decode_document_content(
                 ),
                 (),
                 None,
+                (),
             )
         except UnicodeDecodeError:
             return (
@@ -504,6 +531,7 @@ def _decode_document_content(
                 ),
                 (),
                 None,
+                (),
             )
 
     if fmt in {
@@ -516,6 +544,7 @@ def _decode_document_content(
                 raw.decode("utf-8"),
                 (),
                 None,
+                (),
             )
         except UnicodeDecodeError:
             try:
@@ -523,9 +552,10 @@ def _decode_document_content(
                     raw.decode("latin-1"),
                     (),
                     None,
+                    (),
                 )
             except Exception:
-                return "", (), None
+                return "", (), None, (), ()
 
     try:
         return (
@@ -534,6 +564,7 @@ def _decode_document_content(
             ),
             (),
             None,
+            (),
         )
     except UnicodeDecodeError:
         return (
@@ -545,6 +576,7 @@ def _decode_document_content(
             ),
             (),
             None,
+            (),
         )
 
 
@@ -560,7 +592,7 @@ def _decode_document_text(
     Devuelve solamente el texto y mantiene el contrato anterior para
     cualquier código interno que todavía la utilice directamente.
     """
-    text, _, _ = _decode_document_content(
+    text, _, _, _ = _decode_document_content(
         data_url=data_url,
         content_type=content_type,
         file_name=file_name,
