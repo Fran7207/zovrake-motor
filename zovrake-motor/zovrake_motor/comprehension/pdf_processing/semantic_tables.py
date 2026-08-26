@@ -296,6 +296,25 @@ class PdfSemanticTableAnalyzer:
             rows=rows,
             page_width=page_width,
             page_height=page_height,
+            header_word_count=sum(
+                len(line)
+                for line in lines
+                if line is not None
+                and abs(
+                    (
+                        sum(
+                            word.center_y
+                            for word in line
+                        )
+                        / len(line)
+                    )
+                    - header_y
+                ) <= self._HEADER_MERGE_Y_TOLERANCE
+            ),
+            matched_header_word_count=sum(
+                len(match.words)
+                for match in header
+            ),
         )
 
         semantic_table = PdfSemanticTable(
@@ -647,116 +666,121 @@ class PdfSemanticTableAnalyzer:
         self,
         words: Sequence[_LayoutWord],
     ) -> list[_HeaderMatch]:
-        matches: list[_HeaderMatch] = []
+        """
+        Identifica encabezados incluso cuando el PDF los entrega
+        fragmentados en varios objetos de texto.
 
+        Ejemplos:
+        - ``U.MEDIDA`` -> unit
+        - ``P.`` + ``UNIT.`` -> unit_price
+        - ``TOTAL`` + ``Bs.`` -> total
+
+        La posición de cada fragmento se conserva para que la etapa
+        posterior pueda reconstruir las columnas mediante geometría.
+        """
         if not words:
-            return matches
+            return []
 
         normalized_words = [
             self._normalize_label(word.text)
             for word in words
         ]
 
-        aliases = [
-            (key, alias)
-            for key, values in self._COLUMN_ALIASES.items()
-            for alias in values
-        ]
+        aliases: list[tuple[str, str]] = []
 
-        single_word_aliases = [
-            item
-            for item in aliases
-            if len(
-                self._normalize_label(
-                    item[1]
-                ).split()
-            ) == 1
-        ]
+        for key, values in self._COLUMN_ALIASES.items():
+            for alias in values:
+                aliases.append(
+                    (
+                        key,
+                        self._normalize_label(alias),
+                    )
+                )
 
-        multi_word_aliases = [
-            item
-            for item in aliases
-            if len(
-                self._normalize_label(
-                    item[1]
-                ).split()
-            ) > 1
-        ]
-
-        aliases = (
-            single_word_aliases
-            + sorted(
-                multi_word_aliases,
-                key=lambda item: len(
-                    self._normalize_label(
-                        item[1]
-                    ).split()
-                ),
-                reverse=True,
+        aliases.extend(
+            (
+                ("unit", "u medida"),
+                ("unit_price", "p unit"),
+                ("unit_price", "p unitario"),
+                ("unit_price", "precio unitario"),
+                ("total", "total bs"),
+                ("total", "total bs."),
             )
         )
 
+        aliases = list(dict.fromkeys(aliases))
+
         index = 0
+        matches: list[_HeaderMatch] = []
 
         while index < len(words):
-            best_match: (
-                tuple[str, str, int, float] | None
-            ) = None
-
             current = normalized_words[index]
 
+            exact_candidates = [
+                item
+                for item in aliases
+                if item[1] == current
+            ]
+
+            if exact_candidates:
+                key, _ = max(
+                    exact_candidates,
+                    key=lambda item: len(item[1]),
+                )
+
+                matches.append(
+                    _HeaderMatch(
+                        key=key,
+                        label=words[index].text,
+                        words=(words[index],),
+                        confidence=1.0,
+                    )
+                )
+
+                index += 1
+                continue
+
+            best_match: tuple[str, str, int] | None = None
+
             for key, alias in aliases:
-                normalized_alias = self._normalize_label(alias)
-                alias_tokens = normalized_alias.split()
+                tokens = alias.split()
 
-                if len(alias_tokens) == 1:
-                    if current == normalized_alias:
-                        best_match = (
-                            key,
-                            alias,
-                            index + 1,
-                            1.0,
-                        )
-                        break
-
+                if len(tokens) <= 1:
                     continue
 
-                end = index + len(alias_tokens)
+                end = index + len(tokens)
 
                 if (
                     end <= len(words)
-                    and normalized_words[index:end]
-                    == alias_tokens
+                    and normalized_words[index:end] == tokens
                 ):
-                    best_match = (
-                        key,
-                        alias,
-                        end,
-                        1.0,
-                    )
-                    break
+                    if (
+                        best_match is None
+                        or len(tokens)
+                        > len(best_match[1].split())
+                    ):
+                        best_match = (
+                            key,
+                            alias,
+                            end,
+                        )
 
             if best_match is None:
                 index += 1
                 continue
 
-            key, alias, end, confidence = best_match
-
-            matched_words = tuple(
-                words[index:end]
-            )
-
-            label = " ".join(
-                word.text
-                for word in matched_words
-            )
+            key, alias, end = best_match
+            matched_words = tuple(words[index:end])
 
             matches.append(
                 _HeaderMatch(
                     key=key,
-                    label=label,
+                    label=" ".join(
+                        word.text
+                        for word in matched_words
+                    ),
                     words=matched_words,
-                    confidence=confidence,
+                    confidence=1.0,
                 )
             )
 
@@ -964,127 +988,133 @@ class PdfSemanticTableAnalyzer:
         word: _LayoutWord,
         columns: Sequence[_ColumnCandidate],
     ) -> _ColumnCandidate | None:
+        """
+        Asigna una palabra a una columna utilizando primero evidencia
+        semántica y después geometría.
+
+        La geometría se interpreta como intervalos entre centros de
+        columnas. Las columnas de descripción reciben un intervalo
+        amplio porque su contenido normalmente ocupa mucho más espacio
+        que su encabezado.
+        """
         if not columns:
             return None
 
-        centers = [
-            column.x_center
-            for column in columns
-            if column.x_center is not None
-        ]
-
-        if not centers:
-            return None
-
-        min_center = min(centers)
-        max_center = max(centers)
-
-        span = max(
-            max_center - min_center,
-            1.0,
+        ordered = sorted(
+            (
+                column
+                for column in columns
+                if column.x_center is not None
+            ),
+            key=lambda column: column.x_center or 0.0,
         )
 
-        best_column: _ColumnCandidate | None = None
-        best_score = float("-inf")
+        if not ordered:
+            return None
 
-        for index, column in enumerate(columns):
-            center = column.x_center
+        x = word.center_x
 
-            if center is None:
-                continue
+        column_keys = {column.key for column in ordered}
 
-            distance = (
-                abs(word.center_x - center)
-                / span
+        if "unit" in column_keys and self._looks_like_unit(word.text):
+            unit_column = next(
+                column for column in ordered if column.key == "unit"
             )
+            if abs(x - (unit_column.x_center or 0.0)) <= 110.0:
+                return unit_column
 
-            score = -distance
-            key = column.key
+        if "code" in column_keys and self._looks_like_code(word.text):
+            code_column = next(
+                column for column in ordered if column.key == "code"
+            )
+            if abs(x - (code_column.x_center or 0.0)) <= 120.0:
+                return code_column
 
-            if key == "description":
-                next_center = (
-                    columns[index + 1].x_center
-                    if index + 1 < len(columns)
-                    else None
+        if self._looks_currency(word.text):
+            price_columns = [
+                column
+                for column in ordered
+                if column.key in {"unit_price", "total"}
+            ]
+            if price_columns:
+                return min(
+                    price_columns,
+                    key=lambda column: abs(
+                        x - (column.x_center or 0.0)
+                    ),
                 )
 
-                previous_center = (
-                    columns[index - 1].x_center
-                    if index > 0
-                    else None
-                )
+        description = next(
+            (
+                column
+                for column in ordered
+                if column.key == "description"
+            ),
+            None,
+        )
 
-                if next_center is not None:
-                    if (
-                        word.center_x
-                        < (
-                            center + next_center
-                        ) / 2
-                    ):
-                        score += 1.5
+        if description is not None and self._looks_numeric(word.text):
+            description_index = ordered.index(description)
 
+            left_boundary = float("-inf")
+            right_boundary = float("inf")
+
+            if description_index > 0:
+                previous_center = ordered[description_index - 1].x_center
                 if previous_center is not None:
-                    if (
-                        word.center_x
-                        > (
-                            previous_center + center
-                        ) / 2
-                    ):
-                        score += 1.5
+                    left_boundary = previous_center + 12.0
 
-                if re.search(
-                    r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]",
-                    word.text,
-                ):
-                    score += 1.5
+            if description_index < len(ordered) - 1:
+                next_center = ordered[description_index + 1].x_center
+                if next_center is not None:
+                    right_boundary = next_center - 12.0
 
-            if (
-                key == "quantity"
-                and self._looks_numeric(word.text)
-                and abs(
-                    word.center_x - center
-                ) <= 90.0
-            ):
-                score += 2.5
+            if left_boundary <= x <= right_boundary:
+                return description
 
-            elif (
-                key == "unit"
-                and self._looks_like_unit(word.text)
-                and abs(
-                    word.center_x - center
-                ) <= 100.0
-            ):
-                score += 3.0
-
-            elif (
-                key == "code"
-                and self._looks_like_code(word.text)
-                and abs(
-                    word.center_x - center
-                ) <= 110.0
-            ):
-                score += 3.5
-
-            elif (
-                key in {
+        if self._looks_numeric(word.text):
+            numeric_columns = [
+                column
+                for column in ordered
+                if column.key in {
+                    "quantity",
                     "unit_price",
                     "total",
                 }
-                and (
-                    self._looks_currency(word.text)
-                    or self._looks_numeric(word.text)
+            ]
+            if numeric_columns:
+                return min(
+                    numeric_columns,
+                    key=lambda column: abs(
+                        x - (column.x_center or 0.0)
+                    ),
                 )
-                and abs(
-                    word.center_x - center
-                ) <= 110.0
-            ):
-                score += 2.5
 
-            if score > best_score:
-                best_score = score
-                best_column = column
+        if description is not None:
+            description_index = ordered.index(description)
 
-        return best_column
+            left_boundary = float("-inf")
+            right_boundary = float("inf")
+
+            if description_index > 0:
+                previous_center = ordered[description_index - 1].x_center
+                if previous_center is not None:
+                    left_boundary = previous_center + 12.0
+
+            if description_index < len(ordered) - 1:
+                next_center = ordered[description_index + 1].x_center
+                if next_center is not None:
+                    right_boundary = next_center - 12.0
+
+            if left_boundary <= x <= right_boundary:
+                return description
+
+        return min(
+            ordered,
+            key=lambda column: abs(
+                x - (column.x_center or 0.0)
+            ),
+        )
 
     @staticmethod
     def _looks_numeric(
@@ -1298,6 +1328,8 @@ class PdfSemanticTableAnalyzer:
         rows: Sequence[dict[str, Any]],
         page_width: float,
         page_height: float,
+        header_word_count: int,
+        matched_header_word_count: int,
     ) -> float:
         if not columns or not rows:
             return 0.0
@@ -1322,22 +1354,25 @@ class PdfSemanticTableAnalyzer:
             / len(rows)
         )
 
+        header_coverage = (
+            matched_header_word_count / header_word_count
+            if header_word_count > 0
+            else 0.0
+        )
+
         geometry_confidence = (
             1.0
-            if page_width > 0
-            and page_height > 0
+            if page_width > 0 and page_height > 0
             else 0.7
         )
 
         return round(
             min(
                 1.0,
-                header_confidence * 0.55
-                + min(
-                    populated_ratio,
-                    1.0,
-                ) * 0.30
-                + geometry_confidence * 0.15,
+                header_confidence * 0.45
+                + min(populated_ratio, 1.0) * 0.25
+                + min(header_coverage, 1.0) * 0.20
+                + geometry_confidence * 0.10,
             ),
             4,
         )
