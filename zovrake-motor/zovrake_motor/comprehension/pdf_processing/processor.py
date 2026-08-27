@@ -400,6 +400,12 @@ class PDFDocumentProcessor:
                         ocr_text=ocr_text,
                     )
 
+                    # La representación de bloques expuesta por la página
+                    # debe coincidir con la que se utilizó para el análisis
+                    # semántico. La procedencia OCR se conserva además en
+                    # ``ocr_blocks``.
+                    text_blocks = layout_blocks
+
                     tables, semantic_tables = self._analyze_page_semantics(
                         page_number=page_number,
                         tables=tables,
@@ -1058,7 +1064,8 @@ class PDFDocumentProcessor:
         - no existe texto extraíble y existen imágenes;
         - existe muy poco texto y además existen imágenes.
 
-        La ejecución real de OCR pertenece a una etapa posterior.
+        La ejecución OCR se realiza mediante ``OcrProcessor`` cuando la
+        página cumple los criterios de necesidad de OCR.
         """
         if not has_text and has_images:
             return True
