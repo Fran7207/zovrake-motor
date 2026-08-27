@@ -98,7 +98,11 @@ class PdfTable:
             "table_id": self.table_id,
             "page_number": self.page_number,
             "rows": [list(row) for row in self.rows],
-            "bbox": list(self.bbox) if self.bbox else None,
+            "bbox": (
+                list(self.bbox)
+                if self.bbox is not None
+                else None
+            ),
             "semantic": (
                 self.semantic.to_dict()
                 if self.semantic is not None
@@ -121,13 +125,47 @@ class PdfTextBlock:
             "block_id": self.block_id,
             "page_number": self.page_number,
             "text": self.text,
-            "bbox": list(self.bbox) if self.bbox else None,
+            "bbox": (
+                list(self.bbox)
+                if self.bbox is not None
+                else None
+            ),
+        }
+
+
+@dataclass(frozen=True)
+class PdfOcrBlock:
+    """
+    Bloque de texto obtenido mediante OCR.
+
+    La información OCR se mantiene separada de los bloques nativos
+    para conservar la procedencia del contenido.
+    """
+
+    block_id: str
+    page_number: int
+    text: str
+    bbox: tuple[float, float, float, float] | None = None
+    confidence: float = 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "block_id": self.block_id,
+            "page_number": self.page_number,
+            "text": self.text,
+            "bbox": (
+                list(self.bbox)
+                if self.bbox is not None
+                else None
+            ),
+            "confidence": self.confidence,
+            "source": "ocr",
         }
 
 
 @dataclass(frozen=True)
 class PdfPageAnalysis:
-    """Análisis físico de una página PDF."""
+    """Análisis físico y documental de una página PDF."""
 
     page_number: int
     width: float
@@ -141,7 +179,17 @@ class PdfPageAnalysis:
     has_tables: bool = False
     has_images: bool = False
     requires_ocr: bool = False
+
+    # Información específica de OCR.
+    ocr_executed: bool = False
+    ocr_text: str = ""
+    ocr_blocks: tuple[PdfOcrBlock, ...] = ()
+    ocr_confidence: float = 0.0
+    ocr_language: str = ""
+    ocr_dpi: int | None = None
+
     warnings: tuple[str, ...] = ()
+    errors: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -150,9 +198,10 @@ class PdfPageAnalysis:
             "height": self.height,
             "text": self.text,
             "text_blocks": [
-                block.to_dict() for block in self.text_blocks
+                block.to_dict()
+                for block in self.text_blocks
             ],
-             "tables": [
+            "tables": [
                 table.to_dict()
                 for table in self.tables
             ],
@@ -161,13 +210,24 @@ class PdfPageAnalysis:
                 for table in self.semantic_tables
             ],
             "images": [
-                image.to_dict() for image in self.images
+                image.to_dict()
+                for image in self.images
             ],
             "has_text": self.has_text,
             "has_tables": self.has_tables,
             "has_images": self.has_images,
             "requires_ocr": self.requires_ocr,
+            "ocr_executed": self.ocr_executed,
+            "ocr_text": self.ocr_text,
+            "ocr_blocks": [
+                block.to_dict()
+                for block in self.ocr_blocks
+            ],
+            "ocr_confidence": self.ocr_confidence,
+            "ocr_language": self.ocr_language,
+            "ocr_dpi": self.ocr_dpi,
             "warnings": list(self.warnings),
+            "errors": list(self.errors),
         }
 
 
@@ -184,7 +244,15 @@ class ProcessedPdfDocument:
     semantic_tables: tuple[PdfSemanticTable, ...] = ()
     images: tuple[PdfImage, ...] = ()
     pdf_metadata: dict[str, Any] = field(default_factory=dict)
+
+    # Estado global de OCR.
     ocr_required: bool = False
+    ocr_executed: bool = False
+    ocr_pages_executed: tuple[int, ...] = ()
+    ocr_confidence: float = 0.0
+    ocr_language: str = ""
+    ocr_dpi: int | None = None
+
     extraction_method: str = "native_pdf"
     warnings: tuple[str, ...] = ()
     errors: tuple[str, ...] = ()
@@ -211,7 +279,8 @@ class ProcessedPdfDocument:
             "file_name": self.file_name,
             "page_count": self.page_count,
             "pages": [
-                page.to_dict() for page in self.pages
+                page.to_dict()
+                for page in self.pages
             ],
             "full_text": self.full_text,
             "tables": [
@@ -223,10 +292,18 @@ class ProcessedPdfDocument:
                 for table in self.semantic_tables
             ],
             "images": [
-                image.to_dict() for image in self.images
+                image.to_dict()
+                for image in self.images
             ],
             "pdf_metadata": self.pdf_metadata,
             "ocr_required": self.ocr_required,
+            "ocr_executed": self.ocr_executed,
+            "ocr_pages_executed": list(
+                self.ocr_pages_executed
+            ),
+            "ocr_confidence": self.ocr_confidence,
+            "ocr_language": self.ocr_language,
+            "ocr_dpi": self.ocr_dpi,
             "extraction_method": self.extraction_method,
             "warnings": list(self.warnings),
             "errors": list(self.errors),
