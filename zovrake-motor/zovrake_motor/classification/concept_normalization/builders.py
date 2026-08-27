@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from zovrake_motor.classification.concept_normalization.enums import (
     ConceptNormalizationStatus,
     NormalizedConceptCategory,
 )
-from zovrake_motor.classification.concept_normalization.gateway import ClassificationCatalogView
 from zovrake_motor.classification.concept_normalization.models import (
     NormalizedConceptCatalog,
     NormalizedConceptRecord,
@@ -20,25 +19,55 @@ from zovrake_motor.classification.concept_normalization.models import (
 from zovrake_motor.classification.material_classification.models import MaterialRecord
 from zovrake_motor.classification.service_classification.models import ServiceRecord
 
+if TYPE_CHECKING:
+    from zovrake_motor.classification.concept_normalization.gateway import (
+        ClassificationCatalogView,
+    )
+
 
 def normalize_text(value: str) -> str:
     """
     Normaliza texto para comparación homogénea.
 
-    Conserva el valor original en el registro; esta función solo produce la forma normalizada.
+    Conserva el valor original en el registro; esta función solo produce
+    la forma normalizada.
     """
     if not value:
         return ""
 
     text = value.strip().lower()
-    text = unicodedata.normalize("NFKD", text)
-    text = "".join(char for char in text if not unicodedata.combining(char))
-    text = re.sub(r"[^\w\s./-]", " ", text, flags=re.UNICODE)
-    text = re.sub(r"\s+", " ", text).strip()
+
+    text = unicodedata.normalize(
+        "NFKD",
+        text,
+    )
+
+    text = "".join(
+        char
+        for char in text
+        if not unicodedata.combining(char)
+    )
+
+    text = re.sub(
+        r"[^\w\s./-]",
+        " ",
+        text,
+        flags=re.UNICODE,
+    )
+
+    text = re.sub(
+        r"\s+",
+        " ",
+        text,
+    ).strip()
+
     return text
 
 
-def build_normalized_concept_id(model_id: str, sequence: int) -> str:
+def build_normalized_concept_id(
+    model_id: str,
+    sequence: int,
+) -> str:
     return f"cne://{model_id}/concept-{sequence:04d}"
 
 
@@ -48,6 +77,7 @@ def _build_traceability_from_material(
     material: MaterialRecord,
 ) -> NormalizedConceptTraceability:
     traceability = material.traceability
+
     return NormalizedConceptTraceability(
         process_id=traceability.process_id,
         document_id=traceability.document_id,
@@ -71,6 +101,7 @@ def _build_traceability_from_service(
     service: ServiceRecord,
 ) -> NormalizedConceptTraceability:
     traceability = service.traceability
+
     return NormalizedConceptTraceability(
         process_id=traceability.process_id,
         document_id=traceability.document_id,
@@ -97,9 +128,22 @@ def build_normalized_concept_from_material(
     original_value: str | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> NormalizedConceptRecord:
-    original = original_value if original_value is not None else material.original_name
+    original = (
+        original_value
+        if original_value is not None
+        else material.original_name
+    )
+
+    record_metadata = dict(material.metadata)
+
+    if metadata:
+        record_metadata.update(metadata)
+
     return NormalizedConceptRecord(
-        normalized_concept_id=build_normalized_concept_id(catalog_view.model_id, sequence),
+        normalized_concept_id=build_normalized_concept_id(
+            catalog_view.model_id,
+            sequence,
+        ),
         original_value=original,
         normalized_value=normalize_text(original),
         concept_type=concept_type,
@@ -117,7 +161,7 @@ def build_normalized_concept_from_material(
             material=material,
         ),
         status=ConceptNormalizationStatus.NORMALIZED,
-        metadata=metadata or {},
+        metadata=record_metadata,
     )
 
 
@@ -131,9 +175,22 @@ def build_normalized_concept_from_service(
     source_category: str = NormalizedConceptCategory.SERVICE.value,
     metadata: dict[str, Any] | None = None,
 ) -> NormalizedConceptRecord:
-    original = original_value if original_value is not None else service.original_name
+    original = (
+        original_value
+        if original_value is not None
+        else service.original_name
+    )
+
+    record_metadata = dict(service.metadata)
+
+    if metadata:
+        record_metadata.update(metadata)
+
     return NormalizedConceptRecord(
-        normalized_concept_id=build_normalized_concept_id(catalog_view.model_id, sequence),
+        normalized_concept_id=build_normalized_concept_id(
+            catalog_view.model_id,
+            sequence,
+        ),
         original_value=original,
         normalized_value=normalize_text(original),
         concept_type=concept_type,
@@ -151,7 +208,7 @@ def build_normalized_concept_from_service(
             service=service,
         ),
         status=ConceptNormalizationStatus.NORMALIZED,
-        metadata=metadata or {},
+        metadata=record_metadata,
     )
 
 
