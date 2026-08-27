@@ -15,6 +15,7 @@ from zovrake_motor.comprehension.pdf_processing.exceptions import (
 )
 from zovrake_motor.comprehension.pdf_processing.models import (
     PdfImage,
+    PdfOcrBlock,
     PdfPageAnalysis,
     PdfSemanticTable,
     PdfTable,
@@ -24,6 +25,7 @@ from zovrake_motor.comprehension.pdf_processing.models import (
 from zovrake_motor.comprehension.pdf_processing.semantic_tables import (
     PdfSemanticTableAnalyzer,
 )
+from zovrake_motor.comprehension.pdf_processing.ocr import OcrProcessor
 
 
 class PDFDocumentProcessor:
@@ -31,17 +33,27 @@ class PDFDocumentProcessor:
     Procesa físicamente un PDF y construye una representación documental
     estructurada para las siguientes etapas de comprensión.
 
-    Esta clase NO realiza todavía:
-    - OCR;
+    Esta clase realiza extracción física del PDF y OCR selectivo
+    para las páginas que lo requieren.
+
+    No realiza:
     - clasificación de materiales;
     - comparación de proveedores;
     - selección de ganador;
     - análisis inteligente.
 
-    Su responsabilidad es comprender la estructura física del PDF.
+    Su responsabilidad es construir la representación documental
+    física y enriquecerla con OCR cuando es necesario.
     """
 
     OCR_TEXT_THRESHOLD = 20
+
+    def __init__(
+        self,
+        *,
+        ocr_processor: OcrProcessor | None = None,
+    ) -> None:
+        self._ocr_processor = ocr_processor or OcrProcessor()
 
     def process(
         self,
@@ -62,6 +74,7 @@ class PDFDocumentProcessor:
                 return self._process_document(
                     document_id=document_id,
                     file_name=file_name,
+                    pdf_bytes=pdf_bytes,
                     reader=reader,
                     plumber_pdf=plumber_pdf,
                 )
@@ -86,6 +99,7 @@ class PDFDocumentProcessor:
         *,
         document_id: str,
         file_name: str,
+        pdf_bytes: bytes,
         reader: PdfReader,
         plumber_pdf: pdfplumber.PDF,
     ) -> ProcessedPdfDocument:
@@ -120,6 +134,7 @@ class PDFDocumentProcessor:
                     page_number=page_number,
                     reader_page=reader.pages[index],
                     plumber_page=plumber_pdf.pages[index],
+                    pdf_bytes=pdf_bytes,
                 )
 
                 pages.append(page_result)
@@ -191,10 +206,43 @@ class PDFDocumentProcessor:
 
         metadata = self._extract_pdf_metadata(reader)
 
-        if ocr_required:
+        ocr_pages_executed = tuple(
+            page.page_number
+            for page in pages
+            if page.ocr_executed
+        )
+        ocr_executed = bool(ocr_pages_executed)
+        ocr_confidences = [
+            page.ocr_confidence
+            for page in pages
+            if page.ocr_executed and page.ocr_confidence > 0.0
+        ]
+        ocr_confidence = (
+            sum(ocr_confidences) / len(ocr_confidences)
+            if ocr_confidences
+            else 0.0
+        )
+        ocr_languages = tuple(
+            dict.fromkeys(
+                page.ocr_language
+                for page in pages
+                if page.ocr_language
+            )
+        )
+        ocr_language = "+".join(ocr_languages)
+        ocr_dpis = tuple(
+            dict.fromkeys(
+                page.ocr_dpi
+                for page in pages
+                if page.ocr_dpi is not None
+            )
+        )
+        ocr_dpi = ocr_dpis[0] if len(ocr_dpis) == 1 else None
+
+        if ocr_required and not ocr_executed:
             document_warnings.append(
-                "Una o más páginas requieren OCR. "
-                "La ejecución OCR se implementará en la siguiente etapa."
+                "Una o más páginas requieren OCR, pero no se obtuvo "
+                "ningún resultado OCR."
             )
 
         if document_errors:
@@ -214,7 +262,16 @@ class PDFDocumentProcessor:
             images=tuple(all_images),
             pdf_metadata=metadata,
             ocr_required=ocr_required,
-            extraction_method="native_pdf",
+            ocr_executed=ocr_executed,
+            ocr_pages_executed=ocr_pages_executed,
+            ocr_confidence=round(ocr_confidence, 4),
+            ocr_language=ocr_language,
+            ocr_dpi=ocr_dpi,
+            extraction_method=(
+                "native_pdf+ocr"
+                if ocr_executed
+                else "native_pdf"
+            ),
             warnings=tuple(
                 dict.fromkeys(document_warnings)
             ),
@@ -229,6 +286,7 @@ class PDFDocumentProcessor:
         page_number: int,
         reader_page: Any,
         plumber_page: pdfplumber.page.Page,
+        pdf_bytes: bytes,
     ) -> PdfPageAnalysis:
         warnings: list[str] = []
 
@@ -284,6 +342,87 @@ class PDFDocumentProcessor:
             text_length=len(text.strip()),
         )
 
+        ocr_executed = False
+        ocr_text = ""
+        ocr_blocks: tuple[PdfOcrBlock, ...] = ()
+        ocr_confidence = 0.0
+        ocr_language = ""
+        ocr_dpi: int | None = None
+
+        if requires_ocr:
+            try:
+                ocr_result = self._ocr_processor.process_page(
+                    pdf_bytes=pdf_bytes,
+                    page_number=page_number,
+                )
+
+                ocr_executed = True
+                ocr_text = ocr_result.text
+                ocr_confidence = ocr_result.confidence
+                ocr_language = ocr_result.language
+                ocr_dpi = ocr_result.dpi
+                ocr_blocks = tuple(
+                    PdfOcrBlock(
+                        block_id=(
+                            f"page-{page_number}-"
+                            f"ocr-{index + 1}"
+                        ),
+                        page_number=page_number,
+                        text=block.text,
+                        bbox=block.bbox,
+                        confidence=block.confidence,
+                    )
+                    for index, block in enumerate(
+                        ocr_result.blocks
+                    )
+                )
+
+                if ocr_text.strip():
+                    text = self._merge_text(
+                        native_text=text,
+                        ocr_text=ocr_text,
+                    )
+
+                    ocr_layout_blocks = [
+                        PdfTextBlock(
+                            block_id=block.block_id,
+                            page_number=block.page_number,
+                            text=block.text,
+                            bbox=block.bbox,
+                        )
+                        for block in ocr_blocks
+                    ]
+
+                    layout_blocks = self._select_layout_blocks_for_ocr(
+                        native_blocks=text_blocks,
+                        ocr_blocks=ocr_layout_blocks,
+                        native_text=self._extract_page_text_value(text_blocks),
+                        ocr_text=ocr_text,
+                    )
+
+                    tables, semantic_tables = self._analyze_page_semantics(
+                        page_number=page_number,
+                        tables=tables,
+                        text_blocks=layout_blocks,
+                        page_width=width,
+                        page_height=height,
+                        warnings=warnings,
+                    )
+
+                else:
+                    warnings.append(
+                        f"Página {page_number}: OCR ejecutado sin texto reconocido."
+                    )
+
+            except Exception as exc:
+                warnings.append(
+                    f"Página {page_number}: no fue posible ejecutar OCR: {exc}"
+                )
+
+        has_text = bool(text.strip())
+        has_tables = bool(tables) or bool(semantic_tables)
+        has_images = bool(images)
+
         return PdfPageAnalysis(
             page_number=page_number,
             width=width,
@@ -297,6 +436,12 @@ class PDFDocumentProcessor:
             has_tables=has_tables,
             has_images=has_images,
             requires_ocr=requires_ocr,
+            ocr_executed=ocr_executed,
+            ocr_text=ocr_text,
+            ocr_blocks=ocr_blocks,
+            ocr_confidence=ocr_confidence,
+            ocr_language=ocr_language,
+            ocr_dpi=ocr_dpi,
             warnings=tuple(warnings),
         )
 
@@ -787,6 +932,114 @@ class PDFDocumentProcessor:
         return " ".join(text.split())
 
     @classmethod
+    @staticmethod
+    def _normalize_comparison_text(value: str) -> str:
+        return " ".join(value.lower().split())
+
+    @staticmethod
+    def _token_overlap(
+        left: str,
+        right: str,
+    ) -> float:
+        left_tokens = {
+            token
+            for token in left.split()
+            if token
+        }
+        right_tokens = {
+            token
+            for token in right.split()
+            if token
+        }
+
+        if not left_tokens or not right_tokens:
+            return 0.0
+
+        intersection = len(
+            left_tokens & right_tokens
+        )
+        denominator = min(
+            len(left_tokens),
+            len(right_tokens),
+        )
+
+        return intersection / denominator
+
+    @classmethod
+    def _merge_text(
+        cls,
+        *,
+        native_text: str,
+        ocr_text: str,
+    ) -> str:
+        native = native_text.strip()
+        ocr = ocr_text.strip()
+
+        if not native:
+            return ocr
+        if not ocr:
+            return native
+
+        native_normalized = cls._normalize_comparison_text(native)
+        ocr_normalized = cls._normalize_comparison_text(ocr)
+
+        if native_normalized in ocr_normalized:
+            return ocr
+
+        if ocr_normalized in native_normalized:
+            return native
+
+        # En documentos escaneados puede existir una pequeña cantidad
+        # de texto nativo residual o incorrectamente extraído. Si el OCR
+        # contiene prácticamente los mismos tokens y aporta más contenido,
+        # utilizamos el OCR como representación textual principal para
+        # evitar duplicaciones.
+        if (
+            len(ocr_normalized) >= len(native_normalized)
+            and cls._token_overlap(
+                native_normalized,
+                ocr_normalized,
+            ) >= 0.60
+        ):
+            return ocr
+
+        return f"{native}\n{ocr}".strip()
+
+    @staticmethod
+    def _extract_page_text_value(
+        blocks: list[PdfTextBlock],
+    ) -> str:
+        return " ".join(
+            block.text.strip()
+            for block in blocks
+            if block.text.strip()
+        ).strip()
+
+    @classmethod
+    def _select_layout_blocks_for_ocr(
+        cls,
+        *,
+        native_blocks: list[PdfTextBlock],
+        ocr_blocks: list[PdfTextBlock],
+        native_text: str,
+        ocr_text: str,
+    ) -> list[PdfTextBlock]:
+        if not ocr_blocks:
+            return native_blocks
+        if not native_blocks:
+            return ocr_blocks
+
+        native_normalized = cls._normalize_comparison_text(native_text)
+        ocr_normalized = cls._normalize_comparison_text(ocr_text)
+
+        if native_normalized and native_normalized in ocr_normalized:
+            return ocr_blocks
+
+        if ocr_normalized and ocr_normalized in native_normalized:
+            return native_blocks
+
+        return [*native_blocks, *ocr_blocks]
+
     def _requires_ocr(
         cls,
         *,
