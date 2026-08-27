@@ -263,7 +263,7 @@ class ProcessedPdfDocument:
 
     @property
     def has_tables(self) -> bool:
-        return bool(self.tables)
+        return bool(self.tables) or bool(self.semantic_tables)
 
     @property
     def has_images(self) -> bool:
