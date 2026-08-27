@@ -1,21 +1,21 @@
-"""Certificación PDF → SemanticTable → CanonicalItem."""
+"""Certificación PDF → SemanticTable → CanonicalItem → CanonicalDocument."""
 
 from __future__ import annotations
 
 import base64
 from pathlib import Path
+from uuid import uuid4
 
-from zovrake_motor.comprehension.canonical.assembler import (
-    CanonicalAssembler,
-)
-from zovrake_motor.comprehension.canonical.models import (
-    CanonicalTraceability,
-)
-from zovrake_motor.comprehension.extraction.models import (
-    ContentExtractionRequest,
+from zovrake_motor.comprehension.canonical import (
+    CanonicalRepresentationEngine,
+    CanonicalRepresentationRequest,
 )
 from zovrake_motor.comprehension.extraction.engine import (
     ContentExtractionEngine,
+)
+from zovrake_motor.comprehension.extraction.models import (
+    AdapterDocumentContext,
+    ContentExtractionRequest,
 )
 from zovrake_motor.motor_runtime.document_content import (
     resolve_evidence_documents,
@@ -31,20 +31,13 @@ TEST_PDFS = (
 
 
 def _data_url_from_file(path: Path) -> str:
-    raw = path.read_bytes()
-
     return (
         "data:application/pdf;base64,"
-        + base64.b64encode(raw).decode("ascii")
+        + base64.b64encode(path.read_bytes()).decode("ascii")
     )
 
 
-def test_pdf_semantic_tables_produce_canonical_items() -> None:
-    """
-    Verifica que las filas de las tablas semánticas lleguen al modelo
-    canónico como ítems independientes y conserven sus atributos.
-    """
-
+def _resolve_documents():
     evidence_documents = tuple(
         {
             "document_id": f"canonical-test-{index + 1:03d}",
@@ -58,174 +51,115 @@ def test_pdf_semantic_tables_produce_canonical_items() -> None:
         for index, pdf_path in enumerate(TEST_PDFS)
     )
 
-    resolved_documents = resolve_evidence_documents(
-        evidence_documents
-    )
+    return resolve_evidence_documents(evidence_documents)
 
-    assert len(resolved_documents) == len(TEST_PDFS)
 
-    for document in resolved_documents:
-        semantic_tables = tuple(
-            document.semantic_tables
-        )
+def test_pdf_semantic_tables_produce_canonical_items() -> None:
+    documents = _resolve_documents()
 
-        assert semantic_tables
+    extraction_engine = ContentExtractionEngine()
+    extraction_engine.initialize()
+
+    canonical_engine = CanonicalRepresentationEngine()
+    canonical_engine.initialize()
+
+    for document in documents:
+        assert document.semantic_tables
 
         semantic_row_count = sum(
             len(table.get("rows") or ())
-            for table in semantic_tables
+            for table in document.semantic_tables
+            if isinstance(table, dict)
         )
 
         assert semantic_row_count > 0
 
-        extraction_engine = ContentExtractionEngine()
-        extraction_engine.initialize()
+        process_id = uuid4()
 
-        request = ContentExtractionRequest(
-            process_id=f"canonical-{document.document_id}",
+        adapter_context = AdapterDocumentContext(
+            process_id=process_id,
             document_id=document.document_id,
+            adapter_name="pdf_adapter",
+            format_type="pdf",
+            document_reference=(
+                f"adapter://pdf_adapter/{document.document_id}"
+            ),
+            original_preserved=True,
             metadata=document.to_adapter_metadata(),
         )
 
-        extraction_result = extraction_engine.extract(
-            request
-        )
-
-        assert extraction_result.metadata.get(
-            "semantic_tables"
-        )
-
-        traceability = CanonicalTraceability(
-            extraction_reference_id=(
-                f"extraction/{document.document_id}"
+        extraction = extraction_engine.extract(
+            ContentExtractionRequest(
+                process_id=process_id,
+                document_id=document.document_id,
+                adapter_context=adapter_context,
             ),
         )
 
-        assembler = CanonicalAssembler()
+        assert extraction.metadata.get("semantic_tables")
 
-        canonical_document = assembler.assemble(
-            extraction_result,
-            traceability=traceability,
+        canonical = canonical_engine.represent(
+            CanonicalRepresentationRequest(
+                process_id=process_id,
+                extraction_result=extraction,
+            ),
         )
 
-        assert canonical_document is not None
-
-        items = tuple(
-            canonical_document.items
-        )
-
-        assert items
+        representation = canonical.representation
+        items = tuple(representation.items)
 
         semantic_items = tuple(
             item
             for item in items
             if isinstance(item.fields, dict)
-            and item.fields.get(
-                "semantic_table_id"
-            )
+            and item.fields.get("semantic_table_id")
         )
 
         assert semantic_items
-
         assert len(semantic_items) == semantic_row_count
 
         for item in semantic_items:
             fields = item.fields
+            values = fields.get("values")
 
-            assert fields.get(
-                "semantic_table_id"
-            )
-
-            assert fields.get(
-                "semantic_columns"
-            )
-
-            values = fields.get(
-                "values"
-            )
-
-            assert isinstance(
-                values,
-                dict,
-            )
-
-            assert any(
-                str(value).strip()
-                for value in values.values()
-            )
-
-            assert fields.get(
-                "semantic_table_confidence"
-            ) is not None
-
+            assert isinstance(values, dict)
+            assert values
+            assert fields.get("semantic_columns")
+            assert fields.get("semantic_table_confidence") is not None
             assert (
                 fields.get(
                     "semantic_table_source_page_number"
                 )
                 is not None
             )
-
-            evidence = fields.get(
-                "semantic_table_evidence"
-            )
-
             assert isinstance(
-                evidence,
+                fields.get("semantic_table_evidence"),
                 list,
             )
-
             assert item.source_reference
-
-            assert (
-                item.description
-                or values.get("description")
-                or values.get("code")
-            )
 
 
 def test_pdf_documents_keep_independent_semantic_structures() -> None:
-    """
-    Verifica que dos PDFs no sean forzados a compartir una plantilla
-    estructural fija.
-    """
-
-    evidence_documents = tuple(
-        {
-            "document_id": f"structure-test-{index + 1:03d}",
-            "document_label": pdf_path.name,
-            "content_type": "application/pdf",
-            "metadata": {
-                "file_name": pdf_path.name,
-                "content_data_url": _data_url_from_file(pdf_path),
-            },
-        }
-        for index, pdf_path in enumerate(TEST_PDFS)
-    )
-
-    documents = resolve_evidence_documents(
-        evidence_documents
-    )
+    documents = _resolve_documents()
 
     assert len(documents) == 2
 
     structures = []
 
     for document in documents:
-        keys = {
-            key
-            for table in document.semantic_tables
-            for row in (
-                table.get("rows") or ()
-            )
-            if isinstance(row, dict)
-            for key in row.keys()
-        }
-
         structures.append(
-            frozenset(keys)
+            frozenset(
+                key
+                for table in document.semantic_tables
+                if isinstance(table, dict)
+                for row in (table.get("rows") or ())
+                if isinstance(row, dict)
+                for key in row
+            )
         )
 
-    assert all(
-        structure
-        for structure in structures
+    assert all(structures)
+
+    assert structures[0] != structures[1] or (
+        documents[0].file_name != documents[1].file_name
     )

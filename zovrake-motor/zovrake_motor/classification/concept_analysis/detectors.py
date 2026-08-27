@@ -24,14 +24,107 @@ class ItemConceptDetector(ConceptDetectorPort):
     def detector_type(self) -> ConceptDetectorType:
         return ConceptDetectorType.ITEM
 
-    def detect(self, model_view: InternalModelView, *, start_sequence: int) -> DetectorResult:
+    def detect(
+        self,
+        model_view: InternalModelView,
+        *,
+        start_sequence: int,
+    ) -> DetectorResult:
         concepts = []
         sequence = start_sequence
+
         for index, item in enumerate(model_view.items):
-            description = str(item.get("description", "")).strip()
+            description = str(
+                item.get("description", "")
+            ).strip()
+
             if not description:
                 continue
-            kind = ConceptKind.PARTIDA if item.get("quantity") or item.get("unit") else ConceptKind.ITEM
+
+            kind = (
+                ConceptKind.PARTIDA
+                if item.get("quantity") or item.get("unit")
+                else ConceptKind.ITEM
+            )
+
+            raw_fields = item.get(
+                "fields",
+                {},
+            )
+
+            if isinstance(raw_fields, dict):
+                item_fields = dict(raw_fields)
+            else:
+                item_fields = {}
+
+            semantic_values = item_fields.get(
+                "values",
+                {},
+            )
+
+            if isinstance(
+                semantic_values,
+                dict,
+            ):
+                normalized_semantic_values = dict(
+                    semantic_values
+                )
+            else:
+                normalized_semantic_values = {}
+
+            semantic_columns = item_fields.get(
+                "semantic_columns",
+                (),
+            )
+
+            if isinstance(
+                semantic_columns,
+                (list, tuple),
+            ):
+                normalized_semantic_columns = tuple(
+                    str(column).strip()
+                    for column in semantic_columns
+                    if str(column).strip()
+                )
+            else:
+                normalized_semantic_columns = ()
+
+            metadata = {
+                "item_id": item.get(
+                    "item_id",
+                    "",
+                ),
+                "quantity": item.get(
+                    "quantity",
+                    "",
+                ),
+                "unit": item.get(
+                    "unit",
+                    "",
+                ),
+                "unit_price": item.get(
+                    "unit_price",
+                    "",
+                ),
+                "fields": item_fields,
+                "semantic_values": normalized_semantic_values,
+                "semantic_columns": normalized_semantic_columns,
+            }
+
+            # Las columnas semánticas descubiertas por el documento
+            # también quedan disponibles directamente para las capas
+            # posteriores, sin perder su representación original.
+            for key, value in normalized_semantic_values.items():
+                normalized_key = str(
+                    key
+                ).strip()
+
+                if not normalized_key:
+                    continue
+
+                if normalized_key not in metadata:
+                    metadata[normalized_key] = value
+
             concepts.append(
                 build_concept(
                     model_view=model_view,
@@ -39,26 +132,47 @@ class ItemConceptDetector(ConceptDetectorPort):
                     kind=kind,
                     original_description=description,
                     section="items",
-                    entity_id=str(item.get("entity_id", item.get("item_id", f"item-{index}"))),
-                    source_reference=str(item.get("source_reference", "")),
-                    canonical_reference=str(item.get("canonical_reference", "")),
-                    extraction_reference=str(item.get("extraction_reference", "")),
+                    entity_id=str(
+                        item.get(
+                            "entity_id",
+                            item.get(
+                                "item_id",
+                                f"item-{index}",
+                            ),
+                        )
+                    ),
+                    source_reference=str(
+                        item.get(
+                            "source_reference",
+                            "",
+                        )
+                    ),
+                    canonical_reference=str(
+                        item.get(
+                            "canonical_reference",
+                            "",
+                        )
+                    ),
+                    extraction_reference=str(
+                        item.get(
+                            "extraction_reference",
+                            "",
+                        )
+                    ),
                     entity_index=index,
-                    metadata={
-                        "item_id": item.get("item_id", ""),
-                        "quantity": item.get("quantity", ""),
-                        "unit": item.get("unit", ""),
-                        "unit_price": item.get("unit_price", ""),
-                    },
+                    metadata=metadata,
                 ),
             )
+
             sequence += 1
 
         return DetectorResult(
             detector_type=self.detector_type,
             detector_name=self.detector_name,
             concepts=tuple(concepts),
-            technical_observations=(f"items_scanned={len(model_view.items)}",),
+            technical_observations=(
+                f"items_scanned={len(model_view.items)}",
+            ),
         )
 
 
