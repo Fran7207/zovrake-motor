@@ -139,8 +139,6 @@ class OcrProcessor:
         text_parts: list[str] = []
         confidences: list[float] = []
 
-        image_width, image_height = image.size
-
         for index, raw_text in enumerate(
             data.get("text", ())
         ):
