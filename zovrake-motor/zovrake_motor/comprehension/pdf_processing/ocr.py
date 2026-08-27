@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from io import BytesIO
+from pathlib import Path
+import os
+import shutil
 from typing import Any
 
 import pypdfium2 as pdfium
@@ -38,7 +41,17 @@ class OcrProcessor:
     Ejecuta OCR sobre páginas PDF rasterizadas.
 
     Este componente no modifica el PDF original.
+
+    La ruta del ejecutable Tesseract se resuelve, en orden, mediante:
+    1. ``TESSERACT_CMD`` si está definido.
+    2. ``tesseract`` disponible en PATH.
+    3. Instalación estándar de Windows en Program Files.
     """
+
+    _WINDOWS_TESSERACT_PATHS = (
+        Path(r"C:\Program Files\Tesseract-OCR\tesseract.exe"),
+        Path(r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe"),
+    )
 
     def __init__(
         self,
@@ -55,9 +68,18 @@ class OcrProcessor:
                 "language no puede estar vacío."
             )
 
+        if psm <= 0:
+            raise ValueError("psm debe ser mayor que cero.")
+
         self._dpi = dpi
         self._language = language
         self._psm = psm
+        self._tesseract_cmd = self._resolve_tesseract()
+
+        # Configuramos explícitamente el ejecutable para que el OCR no
+        # dependa de que el proceso que ejecuta pytest/Windows haya
+        # heredado correctamente el PATH.
+        pytesseract.pytesseract.tesseract_cmd = self._tesseract_cmd
 
     @property
     def dpi(self) -> int:
@@ -70,6 +92,10 @@ class OcrProcessor:
     @property
     def psm(self) -> int:
         return self._psm
+
+    @property
+    def tesseract_cmd(self) -> str:
+        return self._tesseract_cmd
 
     def process_page(
         self,
@@ -119,6 +145,41 @@ class OcrProcessor:
 
         finally:
             pdf.close()
+
+    def _resolve_tesseract(self) -> str:
+        """
+        Resuelve el ejecutable real de Tesseract sin depender exclusivamente
+        del PATH del proceso actual.
+        """
+        configured = os.environ.get("TESSERACT_CMD", "").strip()
+
+        if configured:
+            configured_path = Path(configured).expanduser()
+
+            if configured_path.is_file():
+                return str(configured_path)
+
+            raise FileNotFoundError(
+                "TESSERACT_CMD está configurado, pero el ejecutable "
+                f"no existe: {configured_path}"
+            )
+
+        path_executable = shutil.which("tesseract")
+
+        if path_executable:
+            return str(Path(path_executable).resolve())
+
+        for candidate in self._WINDOWS_TESSERACT_PATHS:
+            if candidate.is_file():
+                return str(candidate)
+
+        raise FileNotFoundError(
+            "No se encontró Tesseract OCR. "
+            "Instale Tesseract o configure TESSERACT_CMD con la ruta "
+            "completa de tesseract.exe. "
+            "Ruta estándar esperada en Windows: "
+            r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+        )
 
     def _run_ocr(
         self,
