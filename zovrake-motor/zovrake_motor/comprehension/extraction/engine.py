@@ -4,9 +4,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from zovrake_motor.comprehension.extraction.adapter_gateway import AdapterDocumentGateway
+from zovrake_motor.comprehension.extraction.adapter_gateway import (
+    AdapterDocumentGateway,
+)
 from zovrake_motor.comprehension.extraction.executor import ExtractionExecutor
-from zovrake_motor.comprehension.extraction.models import ContentExtractionRequest, ContentExtractionResult
+from zovrake_motor.comprehension.extraction.models import (
+    ContentExtractionRequest,
+    ContentExtractionResult,
+)
 from zovrake_motor.comprehension.extraction.ocr_hook import OcrIntegrationPoint
 from zovrake_motor.comprehension.extraction.port import ContentExtractorPort
 from zovrake_motor.comprehension.extraction.registry import ExtractorRegistry
@@ -53,39 +58,76 @@ class ContentExtractionEngine:
     @property
     def ocr_integration(self) -> OcrIntegrationPoint:
         if self._ocr_hook is None:
-            self._ocr_hook = OcrIntegrationPoint(settings=self._extraction_settings())
+            self._ocr_hook = OcrIntegrationPoint(
+                settings=self._extraction_settings()
+            )
         return self._ocr_hook
 
     def is_ready(self) -> bool:
-        return self._initialized and self._registry.count() >= self.EXPECTED_EXTRACTOR_COUNT
+        return (
+            self._initialized
+            and self._registry.count() >= self.EXPECTED_EXTRACTOR_COUNT
+        )
 
     def initialize(self) -> None:
         if not self._registry.count():
-            self._registry.register_defaults(settings=self._extraction_settings())
+            self._registry.register_defaults(
+                settings=self._extraction_settings()
+            )
+
         self._executor = ExtractionExecutor(self._registry)
-        self._ocr_hook = OcrIntegrationPoint(settings=self._extraction_settings())
+        self._ocr_hook = OcrIntegrationPoint(
+            settings=self._extraction_settings()
+        )
         self._initialized = True
 
-    def extract(self, request: ContentExtractionRequest) -> ContentExtractionResult:
+    def extract(
+        self,
+        request: ContentExtractionRequest,
+    ) -> ContentExtractionResult:
         context = self._gateway.validate(request)
-        ocr_status = self.ocr_integration.prepare_for_future_execution()
+
+        ocr_status = (
+            self.ocr_integration.prepare_for_future_execution()
+        )
+
         result = self.executor.execute(
             request,
             adapter_name=context.adapter_name,
             original_preserved=context.original_preserved,
             ocr_integration_prepared=self.ocr_integration.is_prepared,
         )
+
         observations = (
             *result.technical_observations,
             f"ocr_status={ocr_status['status']}",
             "document_original_unmodified=True",
         )
+
+        semantic_tables = context.metadata.get(
+            "semantic_tables",
+            (),
+        )
+
+        if isinstance(semantic_tables, (list, tuple)):
+            normalized_semantic_tables = tuple(
+                table
+                for table in semantic_tables
+                if isinstance(table, dict)
+            )
+        else:
+            normalized_semantic_tables = ()
+
         return ContentExtractionResult(
             process_id=result.process_id,
             document_id=result.document_id,
             extracted_text=result.extracted_text,
             tables=result.tables,
-            metadata={**result.metadata, "ocr_preparation": ocr_status},
+            metadata={
+                **result.metadata,
+                "ocr_preparation": ocr_status,
+                "semantic_tables": normalized_semantic_tables,
+            },
             structural_elements=result.structural_elements,
             incidents=result.incidents,
             original_preserved=result.original_preserved,
@@ -102,10 +144,12 @@ class ContentExtractionEngine:
     def _extraction_settings(self) -> DocumentExtractionSettings:
         if self._config_provider is not None:
             return self._config_provider.comprehension().extraction
+
         return DocumentExtractionSettings.default()
 
     def snapshot(self) -> dict[str, Any]:
         settings = self._extraction_settings()
+
         return {
             "initialized": self._initialized,
             "extractors_count": self._registry.count(),
@@ -114,7 +158,9 @@ class ContentExtractionEngine:
             "configuration": {
                 "enabled": settings.enabled,
                 "preserve_original": settings.preserve_original,
-                "ocr_integration_prepared": settings.ocr_integration_prepared,
+                "ocr_integration_prepared": (
+                    settings.ocr_integration_prepared
+                ),
                 "ocr_enabled": settings.ocr_enabled,
             },
         }
