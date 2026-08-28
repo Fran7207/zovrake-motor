@@ -58,6 +58,31 @@ class _HeaderMatch:
         ) / len(self.words)
 
 
+@dataclass(frozen=True)
+class _LayoutHeaderCandidate:
+    """Candidato de encabezado localizado dentro del layout de una página."""
+
+    matches: tuple[_HeaderMatch, ...]
+    start_line_index: int
+    end_line_index: int
+    score: float
+
+    @property
+    def header_y(self) -> float:
+        return max(
+            word.center_y
+            for match in self.matches
+            for word in match.words
+        )
+
+    @property
+    def header_word_count(self) -> int:
+        return sum(
+            len(match.words)
+            for match in self.matches
+        )
+
+
 class PdfSemanticTableAnalyzer:
     """
     Analizador semántico de tablas PDF.
@@ -226,8 +251,10 @@ class PdfSemanticTableAnalyzer:
         """
         Analiza una página utilizando palabras y coordenadas.
 
-        Esta ruta complementa el análisis de tablas físicas y permite
-        reconstruir una tabla a partir del layout textual de la página.
+        A diferencia de una implementación de una sola tabla por página,
+        esta ruta localiza todos los encabezados semánticamente plausibles,
+        separa sus regiones verticales y construye una tabla independiente
+        para cada región con evidencia suficiente.
 
         Utiliza:
         - posición horizontal;
@@ -250,101 +277,97 @@ class PdfSemanticTableAnalyzer:
         if not lines:
             return []
 
-        header = self._find_layout_header(lines)
+        headers = self._find_layout_headers(lines)
 
-        if header is None:
+        if not headers:
             return []
 
-        columns = self._infer_layout_columns(header)
+        semantic_tables: list[PdfSemanticTable] = []
 
-        if len(columns) < self._MIN_HEADER_MATCHES:
-            return []
+        for table_index, header_candidate in enumerate(
+            headers,
+            start=1,
+        ):
+            columns = self._infer_layout_columns(
+                header_candidate.matches
+            )
 
-        header_y = max(
-            word.center_y
-            for match in header
-            for word in match.words
-        )
+            if len(columns) < self._MIN_HEADER_MATCHES:
+                continue
 
-        data_lines = self._collect_data_lines(
-            lines=lines,
-            header_y=header_y,
-            columns=columns,
-            page_height=page_height,
-        )
+            next_header_y = (
+                headers[table_index].header_y
+                if table_index < len(headers)
+                else None
+            )
 
-        if not data_lines:
-            return []
+            data_lines = self._collect_data_lines(
+                lines=lines,
+                header_y=header_candidate.header_y,
+                columns=columns,
+                page_height=page_height,
+                end_y=next_header_y,
+            )
 
-        rows = self._assign_layout_lines_to_columns(
-            data_lines=data_lines,
-            columns=columns,
-        )
+            if not data_lines:
+                continue
 
-        rows = self._normalize_semantic_rows(rows)
+            rows = self._assign_layout_lines_to_columns(
+                data_lines=data_lines,
+                columns=columns,
+            )
 
-        if not rows:
-            return []
+            rows = self._normalize_semantic_rows(rows)
 
-        bbox = self._calculate_layout_bbox(
-            header=header,
-            data_lines=data_lines,
-        )
+            if not rows:
+                continue
 
-        confidence = self._calculate_layout_confidence(
-            columns=columns,
-            rows=rows,
-            page_width=page_width,
-            page_height=page_height,
-            header_word_count=sum(
-                len(line)
-                for line in lines
-                if line is not None
-                and abs(
-                    (
-                        sum(
-                            word.center_y
-                            for word in line
+            bbox = self._calculate_layout_bbox(
+                header=header_candidate.matches,
+                data_lines=data_lines,
+            )
+
+            confidence = self._calculate_layout_confidence(
+                columns=columns,
+                rows=rows,
+                page_width=page_width,
+                page_height=page_height,
+                header_word_count=header_candidate.header_word_count,
+                matched_header_word_count=header_candidate.header_word_count,
+            )
+
+            semantic_tables.append(
+                PdfSemanticTable(
+                    table_id=(
+                        f"page-{page_number}-"
+                        f"semantic-table-{len(semantic_tables) + 1}"
+                    ),
+                    columns=tuple(
+                        PdfTableColumn(
+                            key=column.key,
+                            label=column.label,
+                            index=column.index,
+                            confidence=column.confidence,
+                            evidence=column.evidence,
                         )
-                        / len(line)
-                    )
-                    - header_y
-                ) <= self._HEADER_MERGE_Y_TOLERANCE
-            ),
-            matched_header_word_count=sum(
-                len(match.words)
-                for match in header
-            ),
-        )
-
-        semantic_table = PdfSemanticTable(
-            table_id=(
-                f"page-{page_number}-"
-                "semantic-table-1"
-            ),
-            columns=tuple(
-                PdfTableColumn(
-                    key=column.key,
-                    label=column.label,
-                    index=column.index,
-                    confidence=column.confidence,
-                    evidence=column.evidence,
+                        for column in columns
+                    ),
+                    rows=tuple(rows),
+                    confidence=confidence,
+                    source_table_id="",
+                    source_page_number=page_number,
+                    evidence=(
+                        f"page:{page_number}",
+                        "source:layout_words",
+                        f"header_columns:{len(columns)}",
+                        f"header_line_start:{header_candidate.start_line_index}",
+                        f"header_line_end:{header_candidate.end_line_index}",
+                        f"bbox:{bbox}",
+                    ),
                 )
-                for column in columns
-            ),
-            rows=tuple(rows),
-            confidence=confidence,
-            source_table_id="",
-            source_page_number=page_number,
-            evidence=(
-                f"page:{page_number}",
-                "source:layout_words",
-                f"header_columns:{len(columns)}",
-                f"bbox:{bbox}",
-            ),
-        )
+            )
 
-        return [semantic_table]
+        return semantic_tables
 
     @staticmethod
     def _clean_rows(
@@ -571,6 +594,151 @@ class PdfSemanticTableAnalyzer:
             (column_confidence * 0.75)
             + (row_confidence * 0.25),
             4,
+        )
+
+    def _find_layout_headers(
+        self,
+        lines: Sequence[Sequence[_LayoutWord]],
+    ) -> list[_LayoutHeaderCandidate]:
+        """
+        Encuentra múltiples encabezados semánticos independientes.
+
+        Se consideran tanto líneas individuales como encabezados
+        fragmentados en dos líneas próximas. Los candidatos solapados
+        representan normalmente la misma cabecera y se reducen al de
+        mayor puntuación.
+        """
+        # Para soportar varias tablas distribuidas a lo largo de una
+        # página, la búsqueda de encabezados no se limita a las primeras
+        # líneas. El límite histórico se mantiene para _find_layout_header,
+        # que conserva su comportamiento original.
+        search_lines = list(lines)
+
+        candidates: list[_LayoutHeaderCandidate] = []
+
+        for index, line in enumerate(search_lines):
+            if not line:
+                continue
+
+            matches = self._match_header_line(line)
+
+            if len(matches) >= self._MIN_HEADER_MATCHES:
+                candidates.append(
+                    _LayoutHeaderCandidate(
+                        matches=tuple(matches),
+                        start_line_index=index,
+                        end_line_index=index,
+                        score=self._score_layout_header(matches),
+                    )
+                )
+
+            if index + 1 >= len(search_lines):
+                continue
+
+            next_line = search_lines[index + 1]
+
+            if not next_line:
+                continue
+
+            first_y = (
+                sum(word.center_y for word in line)
+                / len(line)
+            )
+            second_y = (
+                sum(word.center_y for word in next_line)
+                / len(next_line)
+            )
+
+            if (
+                abs(second_y - first_y)
+                > self._HEADER_MERGE_Y_TOLERANCE
+            ):
+                continue
+
+            merged = tuple(line) + tuple(next_line)
+            merged_matches = self._match_header_line(merged)
+
+            if len(merged_matches) < self._MIN_HEADER_MATCHES:
+                continue
+
+            candidates.append(
+                _LayoutHeaderCandidate(
+                    matches=tuple(merged_matches),
+                    start_line_index=index,
+                    end_line_index=index + 1,
+                    score=self._score_layout_header(
+                        merged_matches
+                    ),
+                )
+            )
+
+        if not candidates:
+            return []
+
+        candidates.sort(
+            key=lambda candidate: (
+                candidate.start_line_index,
+                -candidate.score,
+            )
+        )
+
+        selected: list[_LayoutHeaderCandidate] = []
+
+        for candidate in candidates:
+            overlapping = [
+                existing
+                for existing in selected
+                if not (
+                    candidate.start_line_index
+                    > existing.end_line_index
+                    or candidate.end_line_index
+                    < existing.start_line_index
+                )
+            ]
+
+            if not overlapping:
+                selected.append(candidate)
+                continue
+
+            best = max(
+                [candidate, *overlapping],
+                key=lambda item: item.score,
+            )
+
+            selected = [
+                existing
+                for existing in selected
+                if existing not in overlapping
+            ]
+            selected.append(best)
+
+        selected.sort(
+            key=lambda candidate: candidate.start_line_index
+        )
+
+        return selected
+
+    @staticmethod
+    def _score_layout_header(
+        matches: Sequence[_HeaderMatch],
+    ) -> float:
+        if not matches:
+            return 0.0
+
+        distinct_keys = len(
+            {match.key for match in matches}
+        )
+
+        x_span = (
+            max(match.x_center for match in matches)
+            - min(match.x_center for match in matches)
+        )
+
+        return (
+            len(matches) * 2.0
+            + distinct_keys * 1.5
+            + min(x_span / 100.0, 5.0)
+            + sum(match.confidence for match in matches)
         )
 
     def _find_layout_header(
@@ -848,6 +1016,7 @@ class PdfSemanticTableAnalyzer:
         header_y: float,
         columns: Sequence[_ColumnCandidate],
         page_height: float,
+        end_y: float | None = None,
     ) -> list[Sequence[_LayoutWord]]:
         if not columns:
             return []
@@ -888,6 +1057,12 @@ class PdfSemanticTableAnalyzer:
                 + self._LINE_Y_TOLERANCE
             ):
                 continue
+
+            if (
+                end_y is not None
+                and line_y >= end_y - self._LINE_Y_TOLERANCE
+            ):
+                break
 
             if (
                 page_height
