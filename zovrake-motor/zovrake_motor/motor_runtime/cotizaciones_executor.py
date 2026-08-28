@@ -1135,9 +1135,9 @@ class CotizacionesAnalysisExecutor:
                 domain_model_catalog=domain_catalog,
             ),
         )
-        structure_catalog = self._inject_providers(
+        structure_catalog = self._inject_group_providers(
             structure_result.catalog.to_dict(),
-            providers=list(provider_ids),
+            provider_source_map=provider_source_map,
         )
         column_result = self._comparative_tables.build_dynamic_columns(
             ComparativeColumnBuildRequest(
@@ -1379,15 +1379,74 @@ class CotizacionesAnalysisExecutor:
         return built.catalog.to_dict()
 
     @staticmethod
-    def _inject_providers(structure_catalog: dict[str, Any], *, providers: list[str]) -> dict[str, Any]:
+    def _inject_group_providers(
+        structure_catalog: dict[str, Any],
+        *,
+        provider_source_map: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """
+        Resuelve los proveedores de cada estructura a partir de sus propias
+        referencias documentales y del mapa proveedor ↔ documento.
+
+        El CSE ya conserva en ``metadata_prepared.available_providers`` las
+        referencias de proveedor pertenecientes a cada Grupo Comparable.
+        En el flujo colectivo esas referencias tienen normalmente la forma
+        ``document://<document_id>``. Aquí se convierten a los ``provider_id``
+        públicos sin sustituirlos por la lista global de proveedores del
+        proceso.
+
+        Regla: un proveedor aparece en una estructura únicamente si una
+        referencia de esa estructura lo vincula con uno de sus documentos
+        fuente. Si un proveedor tiene varios documentos dentro del mismo
+        grupo, se conserva una sola fila por proveedor.
+        """
         catalog = copy.deepcopy(structure_catalog)
-        unique_providers = [provider for provider in providers if provider]
-        if not unique_providers:
-            unique_providers = ["PROVEEDOR-1"]
+
+        provider_by_id: dict[str, str] = {}
+        provider_by_document_id: dict[str, str] = {}
+
+        for entry in provider_source_map:
+            provider_id = str(entry.get("provider_id", "")).strip()
+            provider_name = str(
+                entry.get("provider_name", provider_id)
+            ).strip()
+            if not provider_id:
+                continue
+
+            provider_by_id[provider_id] = provider_id
+            if provider_name:
+                provider_by_id.setdefault(provider_name, provider_id)
+
+            for document_id in entry.get("document_ids", []):
+                normalized_document_id = str(document_id).strip()
+                if normalized_document_id:
+                    provider_by_document_id[normalized_document_id] = provider_id
+
         for structure in catalog.get("structures", []):
             metadata_prepared = dict(structure.get("metadata_prepared", {}))
-            metadata_prepared["available_providers"] = list(unique_providers)
+            raw_references = metadata_prepared.get("available_providers", [])
+            resolved_providers: list[str] = []
+            seen: set[str] = set()
+
+            for raw_reference in raw_references:
+                reference = str(raw_reference).strip()
+                if not reference:
+                    continue
+
+                provider_id = provider_by_id.get(reference)
+                if provider_id is None and reference.startswith("document://"):
+                    document_id = reference[len("document://"):].strip()
+                    provider_id = provider_by_document_id.get(document_id)
+                if provider_id is None:
+                    provider_id = provider_by_document_id.get(reference)
+
+                if provider_id and provider_id not in seen:
+                    seen.add(provider_id)
+                    resolved_providers.append(provider_id)
+
+            metadata_prepared["available_providers"] = resolved_providers
             structure["metadata_prepared"] = metadata_prepared
+
         return catalog
 
     @staticmethod
