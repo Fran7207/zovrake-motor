@@ -1139,6 +1139,10 @@ class CotizacionesAnalysisExecutor:
             structure_result.catalog.to_dict(),
             provider_source_map=provider_source_map,
         )
+        self._validate_group_provider_isolation(
+            structure_catalog=structure_catalog,
+            provider_source_map=provider_source_map,
+        )
         column_result = self._comparative_tables.build_dynamic_columns(
             ComparativeColumnBuildRequest(
                 process_id=process_id,
@@ -1385,76 +1389,173 @@ class CotizacionesAnalysisExecutor:
         provider_source_map: list[dict[str, Any]],
     ) -> dict[str, Any]:
         """
-        Resuelve los proveedores de cada estructura desde sus documentos fuente.
+        Resuelve los proveedores pertenecientes a cada estructura comparativa.
 
-        La estructura comparativa representa un Grupo Comparable y, por tanto,
-        solo puede recibir proveedores pertenecientes a ese grupo. La resolución
-        usa la trazabilidad documental del grupo y el ``provider_source_map``
-        construido a partir de los documentos de entrada.
+        La resolución parte únicamente de referencias documentales o de
+        identidad de proveedor que ya estén presentes en la estructura.
+        Nunca utiliza el conjunto global de proveedores como fallback.
+
+        Se consideran las representaciones de procedencia que puede producir
+        el CSE/PM6: ``metadata_prepared.available_providers``,
+        ``traceability.lineage.document_ids``, ``traceability.lineage.document_id``,
+        ``domain_reference.document_id``, ``traceability.document_ids`` y
+        ``traceability.document_id``.
         """
+        if not isinstance(structure_catalog, dict):
+            raise TypeError("structure_catalog debe ser un diccionario.")
+
         catalog = copy.deepcopy(structure_catalog)
 
-        document_to_provider: dict[str, str] = {}
+        provider_by_id: dict[str, str] = {}
+        provider_by_document_id: dict[str, str] = {}
+
         for entry in provider_source_map:
+            if not isinstance(entry, dict):
+                continue
+
             provider_id = str(entry.get("provider_id", "")).strip()
+            provider_name = str(entry.get("provider_name", provider_id)).strip()
             if not provider_id:
                 continue
+
+            provider_by_id[provider_id] = provider_id
+            if provider_name:
+                provider_by_id[provider_name] = provider_id
+
             document_ids = entry.get("document_ids", [])
-            if not isinstance(document_ids, list | tuple):
-                continue
-            for document_id in document_ids:
-                normalized_document_id = str(document_id).strip()
-                if normalized_document_id:
-                    document_to_provider[normalized_document_id] = provider_id
+            if isinstance(document_ids, (list, tuple, set)):
+                for document_id in document_ids:
+                    normalized = str(document_id).strip()
+                    if normalized:
+                        provider_by_document_id[normalized] = provider_id
 
         for structure in catalog.get("structures", []):
-            traceability = structure.get("traceability") or {}
-            lineage = traceability.get("lineage") or {}
-            domain_reference = structure.get("domain_reference") or {}
-
-            raw_document_ids = lineage.get("document_ids", [])
-            if not isinstance(raw_document_ids, list | tuple):
-                raw_document_ids = []
-
-            document_ids = [
-                str(document_id).strip()
-                for document_id in raw_document_ids
-                if str(document_id).strip()
-            ]
-
-            primary_document_id = str(
-                lineage.get("document_id")
-                or domain_reference.get("document_id")
-                or ""
-            ).strip()
-            if primary_document_id and primary_document_id not in document_ids:
-                document_ids.insert(0, primary_document_id)
-
-            providers: list[str] = []
-            seen: set[str] = set()
-            for document_id in document_ids:
-                provider_id = document_to_provider.get(document_id, "")
-                if provider_id and provider_id not in seen:
-                    seen.add(provider_id)
-                    providers.append(provider_id)
+            if not isinstance(structure, dict):
+                continue
 
             metadata_prepared = dict(structure.get("metadata_prepared", {}))
-            metadata_prepared["available_providers"] = providers
+            raw_references: list[Any] = []
+
+            available_providers = metadata_prepared.get("available_providers", [])
+            if isinstance(available_providers, (list, tuple, set)):
+                raw_references.extend(available_providers)
+
+            traceability = dict(structure.get("traceability", {}))
+            lineage = dict(traceability.get("lineage", {}))
+            domain_reference = dict(structure.get("domain_reference", {}))
+
+            lineage_document_ids = lineage.get("document_ids", [])
+            if isinstance(lineage_document_ids, (list, tuple, set)):
+                raw_references.extend(lineage_document_ids)
+            raw_references.extend((
+                lineage.get("document_id", ""),
+                domain_reference.get("document_id", ""),
+                traceability.get("document_id", ""),
+            ))
+
+            for field_name in ("document_ids", "source_document_ids"):
+                value = structure.get(field_name, [])
+                if isinstance(value, (list, tuple, set)):
+                    raw_references.extend(value)
+                elif value:
+                    raw_references.append(value)
+
+            resolved_providers: list[str] = []
+            seen: set[str] = set()
+
+            for raw_reference in raw_references:
+                reference = str(raw_reference).strip()
+                if not reference:
+                    continue
+
+                provider_id = provider_by_id.get(reference)
+
+                if provider_id is None and reference.startswith("document://"):
+                    document_id = reference[len("document://"):].strip()
+                    provider_id = provider_by_document_id.get(document_id)
+
+                if provider_id is None:
+                    provider_id = provider_by_document_id.get(reference)
+
+                if provider_id and provider_id not in seen:
+                    seen.add(provider_id)
+                    resolved_providers.append(provider_id)
+
+            metadata_prepared["available_providers"] = resolved_providers
+            metadata_prepared["provider_resolution"] = {
+                "source": "provider_source_map",
+                "resolved_provider_count": len(resolved_providers),
+                "global_provider_set_applied": False,
+            }
             structure["metadata_prepared"] = metadata_prepared
 
         return catalog
 
     @staticmethod
-    def _inject_providers(structure_catalog: dict[str, Any], *, providers: list[str]) -> dict[str, Any]:
-        catalog = copy.deepcopy(structure_catalog)
-        unique_providers = [provider for provider in providers if provider]
-        if not unique_providers:
-            unique_providers = ["PROVEEDOR-1"]
-        for structure in catalog.get("structures", []):
+    def _validate_group_provider_isolation(
+        *,
+        structure_catalog: dict[str, Any],
+        provider_source_map: list[dict[str, Any]],
+    ) -> None:
+        """Valida defensivamente que ningún proveedor cruce de grupo."""
+        known_provider_ids = {
+            str(entry.get("provider_id", "")).strip()
+            for entry in provider_source_map
+            if isinstance(entry, dict) and str(entry.get("provider_id", "")).strip()
+        }
+
+        provider_documents: dict[str, set[str]] = {}
+        for entry in provider_source_map:
+            if not isinstance(entry, dict):
+                continue
+            provider_id = str(entry.get("provider_id", "")).strip()
+            if not provider_id:
+                continue
+            provider_documents[provider_id] = {
+                str(document_id).strip()
+                for document_id in entry.get("document_ids", [])
+                if str(document_id).strip()
+            }
+
+        for index, structure in enumerate(structure_catalog.get("structures", [])):
+            if not isinstance(structure, dict):
+                continue
+
             metadata_prepared = dict(structure.get("metadata_prepared", {}))
-            metadata_prepared["available_providers"] = list(unique_providers)
-            structure["metadata_prepared"] = metadata_prepared
-        return catalog
+            providers = metadata_prepared.get("available_providers", [])
+            if not isinstance(providers, (list, tuple, set)):
+                raise RuntimeError(
+                    f"La estructura {index} tiene available_providers con un tipo inválido."
+                )
+
+            traceability = dict(structure.get("traceability", {}))
+            lineage = dict(traceability.get("lineage", {}))
+            document_ids: set[str] = set()
+
+            for value in lineage.get("document_ids", []) if isinstance(lineage.get("document_ids", []), (list, tuple, set)) else []:
+                if str(value).strip():
+                    document_ids.add(str(value).strip())
+
+            for value in (
+                lineage.get("document_id", ""),
+                dict(structure.get("domain_reference", {})).get("document_id", ""),
+                traceability.get("document_id", ""),
+            ):
+                if str(value).strip():
+                    document_ids.add(str(value).strip())
+
+            for provider_raw in providers:
+                provider_id = str(provider_raw).strip()
+                if not provider_id:
+                    continue
+                if provider_id not in known_provider_ids:
+                    raise RuntimeError(
+                        f"La estructura {index} contiene un proveedor desconocido: {provider_id}."
+                    )
+                if document_ids and not (provider_documents.get(provider_id, set()) & document_ids):
+                    raise RuntimeError(
+                        f"La estructura {index} asignó el proveedor {provider_id} sin una fuente documental compatible."
+                    )
 
     @staticmethod
     def _ensure_comparable_duplicate(normalized_catalog: dict[str, Any]) -> dict[str, Any]:
