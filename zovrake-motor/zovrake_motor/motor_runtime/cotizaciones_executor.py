@@ -1086,9 +1086,7 @@ class CotizacionesAnalysisExecutor:
                 service_catalog=service_result.catalog.to_dict(),
             ),
         )
-        normalized_catalog = self._ensure_comparable_duplicate(
-            normalization_result.catalog.to_dict(),
-        )
+        normalized_catalog = normalization_result.catalog.to_dict()
         equivalence_result = self._classification.detect_equivalences(
             EquivalenceDetectionRequest(
                 process_id=process_id,
