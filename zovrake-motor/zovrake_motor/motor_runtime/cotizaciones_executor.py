@@ -1139,6 +1139,10 @@ class CotizacionesAnalysisExecutor:
             structure_result.catalog.to_dict(),
             provider_source_map=provider_source_map,
         )
+        self._validate_group_provider_isolation(
+            structure_catalog=structure_catalog,
+            provider_source_map=provider_source_map,
+        )
         column_result = self._comparative_tables.build_dynamic_columns(
             ComparativeColumnBuildRequest(
                 process_id=process_id,
@@ -1385,46 +1389,114 @@ class CotizacionesAnalysisExecutor:
         provider_source_map: list[dict[str, Any]],
     ) -> dict[str, Any]:
         """
-        Resuelve los proveedores de cada estructura a partir de sus propias
-        referencias documentales y del mapa proveedor ↔ documento.
+        Resuelve los proveedores de CADA estructura usando únicamente las
+        referencias documentales que pertenecen a esa estructura.
 
-        El CSE ya conserva en ``metadata_prepared.available_providers`` las
-        referencias de proveedor pertenecientes a cada Grupo Comparable.
-        En el flujo colectivo esas referencias tienen normalmente la forma
-        ``document://<document_id>``. Aquí se convierten a los ``provider_id``
-        públicos sin sustituirlos por la lista global de proveedores del
-        proceso.
+        Regla arquitectónica:
+            - nunca se inyecta la lista global de proveedores en una estructura;
+            - una estructura solo recibe proveedores que puedan resolverse
+              desde una referencia explícita de su propio grupo;
+            - si un proveedor tiene varios documentos dentro del mismo grupo,
+              se mantiene una sola identidad de proveedor;
+            - si una estructura no trae referencias de proveedor/documento,
+              permanece sin proveedores: no se inventa pertenencia.
 
-        Regla: un proveedor aparece en una estructura únicamente si una
-        referencia de esa estructura lo vincula con uno de sus documentos
-        fuente. Si un proveedor tiene varios documentos dentro del mismo
-        grupo, se conserva una sola fila por proveedor.
+        Las referencias pueden llegar desde las distintas representaciones
+        conservadas por PM5/PM6:
+            metadata_prepared.available_providers
+            model_reference.document_ids
+            traceability.document_ids
+            document_ids / source_document_ids
+
+        En la práctica, el CSE suele entregar referencias como
+        ``document://<document_id>`` en ``available_providers``.
         """
+        if not isinstance(structure_catalog, dict):
+            raise TypeError("structure_catalog debe ser un diccionario.")
+
         catalog = copy.deepcopy(structure_catalog)
 
         provider_by_id: dict[str, str] = {}
         provider_by_document_id: dict[str, str] = {}
 
         for entry in provider_source_map:
+            if not isinstance(entry, dict):
+                continue
+
             provider_id = str(entry.get("provider_id", "")).strip()
             provider_name = str(
                 entry.get("provider_name", provider_id)
             ).strip()
+
             if not provider_id:
                 continue
 
             provider_by_id[provider_id] = provider_id
+
             if provider_name:
                 provider_by_id.setdefault(provider_name, provider_id)
 
-            for document_id in entry.get("document_ids", []):
+            document_ids = entry.get("document_ids", [])
+            if not isinstance(document_ids, (list, tuple, set)):
+                document_ids = [document_ids]
+
+            for document_id in document_ids:
                 normalized_document_id = str(document_id).strip()
                 if normalized_document_id:
-                    provider_by_document_id[normalized_document_id] = provider_id
+                    provider_by_document_id[
+                        normalized_document_id
+                    ] = provider_id
 
         for structure in catalog.get("structures", []):
-            metadata_prepared = dict(structure.get("metadata_prepared", {}))
-            raw_references = metadata_prepared.get("available_providers", [])
+            if not isinstance(structure, dict):
+                continue
+
+            metadata_prepared = dict(
+                structure.get("metadata_prepared", {})
+            )
+
+            raw_references: list[Any] = []
+
+            available_providers = metadata_prepared.get(
+                "available_providers",
+                [],
+            )
+            if isinstance(available_providers, (list, tuple, set)):
+                raw_references.extend(available_providers)
+            elif available_providers:
+                raw_references.append(available_providers)
+
+            for container_key in (
+                "model_reference",
+                "traceability",
+                "metadata",
+            ):
+                container = structure.get(container_key, {})
+                if not isinstance(container, dict):
+                    continue
+
+                for field_name in (
+                    "document_ids",
+                    "source_document_ids",
+                    "document_references",
+                    "provider_references",
+                ):
+                    value = container.get(field_name, [])
+                    if isinstance(value, (list, tuple, set)):
+                        raw_references.extend(value)
+                    elif value:
+                        raw_references.append(value)
+
+            for field_name in (
+                "document_ids",
+                "source_document_ids",
+            ):
+                value = structure.get(field_name, [])
+                if isinstance(value, (list, tuple, set)):
+                    raw_references.extend(value)
+                elif value:
+                    raw_references.append(value)
+
             resolved_providers: list[str] = []
             seen: set[str] = set()
 
@@ -1434,20 +1506,170 @@ class CotizacionesAnalysisExecutor:
                     continue
 
                 provider_id = provider_by_id.get(reference)
-                if provider_id is None and reference.startswith("document://"):
-                    document_id = reference[len("document://"):].strip()
-                    provider_id = provider_by_document_id.get(document_id)
+
+                if (
+                    provider_id is None
+                    and reference.startswith("document://")
+                ):
+                    document_id = reference[
+                        len("document://"):
+                    ].strip()
+                    provider_id = provider_by_document_id.get(
+                        document_id
+                    )
+
                 if provider_id is None:
-                    provider_id = provider_by_document_id.get(reference)
+                    provider_id = provider_by_document_id.get(
+                        reference
+                    )
 
                 if provider_id and provider_id not in seen:
                     seen.add(provider_id)
                     resolved_providers.append(provider_id)
 
             metadata_prepared["available_providers"] = resolved_providers
+            metadata_prepared["provider_resolution_scope"] = "group"
+            metadata_prepared["provider_resolution_global_fallback"] = False
+            metadata_prepared["provider_resolution_count"] = len(
+                resolved_providers
+            )
+
             structure["metadata_prepared"] = metadata_prepared
 
         return catalog
+
+    @staticmethod
+    def _validate_group_provider_isolation(
+        *,
+        structure_catalog: dict[str, Any],
+        provider_source_map: list[dict[str, Any]],
+    ) -> None:
+        """
+        Validación defensiva del aislamiento proveedor ↔ estructura.
+
+        La resolución real ya se hizo únicamente a partir de las referencias
+        de cada estructura en ``_inject_group_providers``. Aquí comprobamos
+        que el resultado no contenga proveedores desconocidos y que, cuando
+        existen referencias documentales explícitas en la estructura, cada
+        proveedor resuelto tenga al menos un documento fuente compatible.
+
+        Importante: jamás se utiliza el mapa global como fallback para
+        rellenar una estructura sin referencias.
+        """
+        known_provider_ids = {
+            str(entry.get("provider_id", "")).strip()
+            for entry in provider_source_map
+            if isinstance(entry, dict)
+            and str(entry.get("provider_id", "")).strip()
+        }
+
+        provider_documents: dict[str, set[str]] = {}
+        for entry in provider_source_map:
+            if not isinstance(entry, dict):
+                continue
+
+            provider_id = str(
+                entry.get("provider_id", "")
+            ).strip()
+            if not provider_id:
+                continue
+
+            document_ids = {
+                str(document_id).strip()
+                for document_id in entry.get("document_ids", [])
+                if str(document_id).strip()
+            }
+            provider_documents[provider_id] = document_ids
+
+        for index, structure in enumerate(
+            structure_catalog.get("structures", [])
+        ):
+            if not isinstance(structure, dict):
+                continue
+
+            metadata_prepared = dict(
+                structure.get("metadata_prepared", {})
+            )
+            providers = metadata_prepared.get(
+                "available_providers",
+                [],
+            )
+
+            if not isinstance(providers, (list, tuple, set)):
+                raise RuntimeError(
+                    f"La estructura {index} tiene available_providers "
+                    "con un tipo inválido."
+                )
+
+            for provider_id_raw in providers:
+                provider_id = str(provider_id_raw).strip()
+
+                if not provider_id:
+                    continue
+
+                if provider_id not in known_provider_ids:
+                    raise RuntimeError(
+                        "Aislamiento de proveedores violado: la estructura "
+                        f"{index} contiene el proveedor desconocido "
+                        f"'{provider_id}'."
+                    )
+
+            document_references: set[str] = set()
+
+            for container_key in (
+                "model_reference",
+                "traceability",
+                "metadata",
+            ):
+                container = structure.get(container_key, {})
+                if not isinstance(container, dict):
+                    continue
+
+                for field_name in (
+                    "document_ids",
+                    "source_document_ids",
+                ):
+                    value = container.get(field_name, [])
+                    if isinstance(value, (list, tuple, set)):
+                        document_references.update(
+                            str(item).strip()
+                            for item in value
+                            if str(item).strip()
+                        )
+                    elif value:
+                        document_references.add(str(value).strip())
+
+            for field_name in (
+                "document_ids",
+                "source_document_ids",
+            ):
+                value = structure.get(field_name, [])
+                if isinstance(value, (list, tuple, set)):
+                    document_references.update(
+                        str(item).strip()
+                        for item in value
+                        if str(item).strip()
+                    )
+                elif value:
+                    document_references.add(str(value).strip())
+
+            if not document_references:
+                continue
+
+            for provider_id_raw in providers:
+                provider_id = str(provider_id_raw).strip()
+                if not provider_id:
+                    continue
+
+                if not provider_documents.get(provider_id, set()).intersection(
+                    document_references
+                ):
+                    raise RuntimeError(
+                        "Aislamiento de proveedores violado: el proveedor "
+                        f"'{provider_id}' no tiene un documento fuente "
+                        f"compatible con la estructura {index}."
+                    )
+
 
     @staticmethod
     def _ensure_comparable_duplicate(normalized_catalog: dict[str, Any]) -> dict[str, Any]:
