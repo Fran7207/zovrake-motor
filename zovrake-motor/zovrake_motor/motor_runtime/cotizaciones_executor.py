@@ -1139,10 +1139,6 @@ class CotizacionesAnalysisExecutor:
             structure_result.catalog.to_dict(),
             provider_source_map=provider_source_map,
         )
-        self._validate_group_provider_isolation(
-            structure_catalog=structure_catalog,
-            provider_source_map=provider_source_map,
-        )
         column_result = self._comparative_tables.build_dynamic_columns(
             ComparativeColumnBuildRequest(
                 process_id=process_id,
@@ -1389,173 +1385,106 @@ class CotizacionesAnalysisExecutor:
         provider_source_map: list[dict[str, Any]],
     ) -> dict[str, Any]:
         """
-        Resuelve los proveedores pertenecientes a cada estructura comparativa.
+        Resuelve los proveedores de cada estructura a partir de su propio grupo.
 
-        La resolución parte únicamente de referencias documentales o de
-        identidad de proveedor que ya estén presentes en la estructura.
-        Nunca utiliza el conjunto global de proveedores como fallback.
+        El CSE entrega referencias documentales en la trazabilidad del grupo.
+        Esta capa de orquestación conoce la relación documento -> proveedor y
+        la adapta para PM6 sin mezclar proveedores de grupos distintos.
 
-        Se consideran las representaciones de procedencia que puede producir
-        el CSE/PM6: ``metadata_prepared.available_providers``,
-        ``traceability.lineage.document_ids``, ``traceability.lineage.document_id``,
-        ``domain_reference.document_id``, ``traceability.document_ids`` y
-        ``traceability.document_id``.
+        No se crea ningún proveedor artificial ni se usa una lista global como
+        fallback: una fila solo puede pertenecer a un proveedor respaldado por
+        la fuente documental del grupo.
         """
-        if not isinstance(structure_catalog, dict):
-            raise TypeError("structure_catalog debe ser un diccionario.")
-
         catalog = copy.deepcopy(structure_catalog)
 
-        provider_by_id: dict[str, str] = {}
-        provider_by_document_id: dict[str, str] = {}
+        document_to_provider: dict[str, str] = {}
+        provider_ids: set[str] = set()
 
         for entry in provider_source_map:
-            if not isinstance(entry, dict):
-                continue
-
             provider_id = str(entry.get("provider_id", "")).strip()
-            provider_name = str(entry.get("provider_name", provider_id)).strip()
             if not provider_id:
                 continue
 
-            provider_by_id[provider_id] = provider_id
-            if provider_name:
-                provider_by_id[provider_name] = provider_id
-
-            document_ids = entry.get("document_ids", [])
-            if isinstance(document_ids, (list, tuple, set)):
-                for document_id in document_ids:
-                    normalized = str(document_id).strip()
-                    if normalized:
-                        provider_by_document_id[normalized] = provider_id
-
-        for structure in catalog.get("structures", []):
-            if not isinstance(structure, dict):
-                continue
-
-            metadata_prepared = dict(structure.get("metadata_prepared", {}))
-            raw_references: list[Any] = []
-
-            available_providers = metadata_prepared.get("available_providers", [])
-            if isinstance(available_providers, (list, tuple, set)):
-                raw_references.extend(available_providers)
-
-            traceability = dict(structure.get("traceability", {}))
-            lineage = dict(traceability.get("lineage", {}))
-            domain_reference = dict(structure.get("domain_reference", {}))
-
-            lineage_document_ids = lineage.get("document_ids", [])
-            if isinstance(lineage_document_ids, (list, tuple, set)):
-                raw_references.extend(lineage_document_ids)
-            raw_references.extend((
-                lineage.get("document_id", ""),
-                domain_reference.get("document_id", ""),
-                traceability.get("document_id", ""),
-            ))
-
-            for field_name in ("document_ids", "source_document_ids"):
-                value = structure.get(field_name, [])
-                if isinstance(value, (list, tuple, set)):
-                    raw_references.extend(value)
-                elif value:
-                    raw_references.append(value)
-
-            resolved_providers: list[str] = []
-            seen: set[str] = set()
-
-            for raw_reference in raw_references:
-                reference = str(raw_reference).strip()
-                if not reference:
+            provider_ids.add(provider_id)
+            for document_id in entry.get("document_ids", []):
+                normalized_document_id = str(document_id).strip()
+                if not normalized_document_id:
                     continue
 
-                provider_id = provider_by_id.get(reference)
+                existing = document_to_provider.get(normalized_document_id)
+                if existing is not None and existing != provider_id:
+                    raise RuntimeError(
+                        "Un document_id pertenece a más de un provider_id en "
+                        "provider_source_map: " + normalized_document_id,
+                    )
+                document_to_provider[normalized_document_id] = provider_id
 
-                if provider_id is None and reference.startswith("document://"):
-                    document_id = reference[len("document://"):].strip()
-                    provider_id = provider_by_document_id.get(document_id)
+        for structure in catalog.get("structures", []):
+            metadata_prepared = dict(structure.get("metadata_prepared", {}))
+            existing_references = tuple(
+                str(reference).strip()
+                for reference in metadata_prepared.get("available_providers", [])
+                if str(reference).strip()
+            )
 
-                if provider_id is None:
-                    provider_id = provider_by_document_id.get(reference)
+            traceability = dict(structure.get("traceability", {}) or {})
+            lineage = dict(traceability.get("lineage", {}) or {})
+            domain_reference = dict(structure.get("domain_reference", {}) or {})
 
-                if provider_id and provider_id not in seen:
-                    seen.add(provider_id)
+            group_document_ids: list[str] = []
+            for raw_document_id in lineage.get("document_ids", []):
+                document_id = str(raw_document_id).strip()
+                if document_id and document_id not in group_document_ids:
+                    group_document_ids.append(document_id)
+
+            for raw_document_id in traceability.get("document_ids", []):
+                document_id = str(raw_document_id).strip()
+                if document_id and document_id not in group_document_ids:
+                    group_document_ids.append(document_id)
+
+            fallback_document_id = str(
+                domain_reference.get("document_id", "")
+            ).strip()
+            if fallback_document_id and fallback_document_id not in group_document_ids:
+                group_document_ids.append(fallback_document_id)
+
+            resolved_providers: list[str] = []
+
+            def add_provider(provider_id: str) -> None:
+                if provider_id and provider_id not in resolved_providers:
                     resolved_providers.append(provider_id)
 
+            for reference in existing_references:
+                if reference in provider_ids:
+                    add_provider(reference)
+                    continue
+
+                document_id = reference.removeprefix("document://").strip()
+                provider_id = document_to_provider.get(document_id)
+                if provider_id is not None:
+                    add_provider(provider_id)
+                    continue
+
+                raise RuntimeError(
+                    f"No se pudo resolver la referencia de proveedor '{reference}' "
+                    f"del grupo {structure.get('group_id', '')} a un proveedor fuente.",
+                )
+
+            for document_id in group_document_ids:
+                provider_id = document_to_provider.get(document_id)
+                if provider_id is None:
+                    raise RuntimeError(
+                        f"No se pudo resolver el document_id '{document_id}' "
+                        f"del grupo {structure.get('group_id', '')} a un proveedor fuente.",
+                    )
+                add_provider(provider_id)
+
             metadata_prepared["available_providers"] = resolved_providers
-            metadata_prepared["provider_resolution"] = {
-                "source": "provider_source_map",
-                "resolved_provider_count": len(resolved_providers),
-                "global_provider_set_applied": False,
-            }
+            metadata_prepared["provider_scope"] = "comparable_group"
+            metadata_prepared["provider_source_document_ids"] = list(group_document_ids)
             structure["metadata_prepared"] = metadata_prepared
 
         return catalog
-
-    @staticmethod
-    def _validate_group_provider_isolation(
-        *,
-        structure_catalog: dict[str, Any],
-        provider_source_map: list[dict[str, Any]],
-    ) -> None:
-        """Valida defensivamente que ningún proveedor cruce de grupo."""
-        known_provider_ids = {
-            str(entry.get("provider_id", "")).strip()
-            for entry in provider_source_map
-            if isinstance(entry, dict) and str(entry.get("provider_id", "")).strip()
-        }
-
-        provider_documents: dict[str, set[str]] = {}
-        for entry in provider_source_map:
-            if not isinstance(entry, dict):
-                continue
-            provider_id = str(entry.get("provider_id", "")).strip()
-            if not provider_id:
-                continue
-            provider_documents[provider_id] = {
-                str(document_id).strip()
-                for document_id in entry.get("document_ids", [])
-                if str(document_id).strip()
-            }
-
-        for index, structure in enumerate(structure_catalog.get("structures", [])):
-            if not isinstance(structure, dict):
-                continue
-
-            metadata_prepared = dict(structure.get("metadata_prepared", {}))
-            providers = metadata_prepared.get("available_providers", [])
-            if not isinstance(providers, (list, tuple, set)):
-                raise RuntimeError(
-                    f"La estructura {index} tiene available_providers con un tipo inválido."
-                )
-
-            traceability = dict(structure.get("traceability", {}))
-            lineage = dict(traceability.get("lineage", {}))
-            document_ids: set[str] = set()
-
-            for value in lineage.get("document_ids", []) if isinstance(lineage.get("document_ids", []), (list, tuple, set)) else []:
-                if str(value).strip():
-                    document_ids.add(str(value).strip())
-
-            for value in (
-                lineage.get("document_id", ""),
-                dict(structure.get("domain_reference", {})).get("document_id", ""),
-                traceability.get("document_id", ""),
-            ):
-                if str(value).strip():
-                    document_ids.add(str(value).strip())
-
-            for provider_raw in providers:
-                provider_id = str(provider_raw).strip()
-                if not provider_id:
-                    continue
-                if provider_id not in known_provider_ids:
-                    raise RuntimeError(
-                        f"La estructura {index} contiene un proveedor desconocido: {provider_id}."
-                    )
-                if document_ids and not (provider_documents.get(provider_id, set()) & document_ids):
-                    raise RuntimeError(
-                        f"La estructura {index} asignó el proveedor {provider_id} sin una fuente documental compatible."
-                    )
 
     @staticmethod
     def _ensure_comparable_duplicate(normalized_catalog: dict[str, Any]) -> dict[str, Any]:
