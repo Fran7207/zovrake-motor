@@ -1944,26 +1944,65 @@ class CotizacionesAnalysisExecutor:
                 )
             )
 
+            # El modelo definitivo ya está delimitado por sus documentos
+            # fuente. No debemos copiar los documentos de todo el proceso
+            # dentro de cada cuadro comparativo.
+            model_document_ids = {
+                str(document_id).strip()
+                for document_id in model.get("document_ids", [])
+                if str(document_id).strip()
+            }
+
+            if not model_document_ids:
+                model_traceability = dict(
+                    model.get("traceability", {}) or {}
+                )
+                traceability_document_ids = model_traceability.get(
+                    "document_ids",
+                    [],
+                )
+                if isinstance(
+                    traceability_document_ids,
+                    (list, tuple, set),
+                ):
+                    model_document_ids = {
+                        str(document_id).strip()
+                        for document_id in traceability_document_ids
+                        if str(document_id).strip()
+                    }
+
+            model_provider_ids = {
+                str(row.get("provider_id", "")).strip()
+                for row in rows
+                if str(row.get("provider_id", "")).strip()
+            }
+
             provider_fields = []
 
             for doc in documents:
+                document_id = str(doc.document_id).strip()
+                provider_id = str(
+                    doc.provider_name
+                    or doc.document_id
+                    or ""
+                ).strip()
+
+                belongs_to_model = document_id in model_document_ids
+                if not model_document_ids:
+                    belongs_to_model = provider_id in model_provider_ids
+
+                if not belongs_to_model:
+                    continue
+
                 provider_fields.append(
                     {
-                        "provider_id": (
-                            doc.provider_name
-                            or doc.document_id
-                        ),
+                        "provider_id": provider_id,
                         "provider_name": doc.provider_name,
                         "document_id": doc.document_id,
                         "currency": doc.commercial_currency,
                         "total_amount": doc.commercial_total_amount,
-                        "payment_terms": (
-                            doc.commercial_payment_terms
-                        ),
-                        "items": [
-                            dict(item)
-                            for item in doc.items
-                        ],
+                        "payment_terms": doc.commercial_payment_terms,
+                        "items": [dict(item) for item in doc.items],
                     }
                 )
 
