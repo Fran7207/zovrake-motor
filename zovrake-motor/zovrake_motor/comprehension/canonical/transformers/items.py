@@ -53,6 +53,104 @@ class ItemsTransformer(ItemsTransformerPort):
             ),
         )
 
+    @staticmethod
+    def _normalize_item_signal(value: Any) -> str:
+        """Normaliza un valor para evaluar evidencia de línea comercial."""
+        if value is None:
+            return ""
+
+        text = str(value).replace("\x00", " ").strip()
+
+        if not text:
+            return ""
+
+        return " ".join(text.split())
+
+    @classmethod
+    def _is_probable_commercial_item(
+        cls,
+        fields: dict[str, Any],
+    ) -> bool:
+        """
+        Determina si una fila contiene evidencia suficiente para representar
+        una línea comercial real.
+
+        La evaluación es deliberadamente flexible: no presupone un formato
+        único de PDF ni exige que existan todas las columnas. Utiliza señales
+        complementarias de descripción, cantidad, unidad, precio, total y
+        código.
+
+        Una fila puramente administrativa (RUC, razón social, dirección,
+        contacto, etc.) no debe convertirse en CanonicalItem solamente por
+        contener texto.
+        """
+        description = cls._normalize_item_signal(
+            fields.get("description")
+            or fields.get("concept")
+            or fields.get("detail")
+            or fields.get("product")
+            or fields.get("material")
+            or fields.get("service")
+        )
+
+        quantity = cls._normalize_item_signal(
+            fields.get("quantity")
+        )
+
+        unit = cls._normalize_item_signal(
+            fields.get("unit")
+        )
+
+        unit_price = cls._normalize_item_signal(
+            fields.get("unit_price")
+        )
+
+        total = cls._normalize_item_signal(
+            fields.get("total")
+        )
+
+        code = cls._normalize_item_signal(
+            fields.get("code")
+            or fields.get("item_code")
+            or fields.get("sku")
+        )
+
+        # Una descripción acompañada de una señal comercial cuantificable
+        # es una evidencia fuerte de línea comercial.
+        if description and (
+            quantity
+            or unit_price
+            or total
+            or code
+        ):
+            return True
+
+        # Algunas tablas no tienen descripción explícita, pero sí código,
+        # cantidad y precio/total.
+        if (
+            code
+            and quantity
+            and (unit_price or total)
+        ):
+            return True
+
+        # Una fila sin descripción puede seguir siendo comercial cuando
+        # presenta una combinación suficientemente fuerte de señales.
+        signal_count = sum(
+            bool(signal)
+            for signal in (
+                quantity,
+                unit,
+                unit_price,
+                total,
+                code,
+            )
+        )
+
+        return signal_count >= 3 and bool(
+            unit_price or total
+        )
+
     def build_items(
         self,
         extraction_result: ContentExtractionResult,
@@ -184,9 +282,8 @@ class ItemsTransformer(ItemsTransformerPort):
                         for key in column_keys
                     }
 
-                    if not any(
-                        str(value).strip()
-                        for value in fields.values()
+                    if not self._is_probable_commercial_item(
+                        fields,
                     ):
                         continue
 
@@ -351,6 +448,19 @@ class ItemsTransformer(ItemsTransformerPort):
                         else ""
                     )
 
+                    physical_fields = {
+                        "description": description,
+                        "quantity": quantity,
+                        "unit_price": unit_price,
+                        "unit": unit,
+                        "values": values,
+                    }
+
+                    if not self._is_probable_commercial_item(
+                        physical_fields,
+                    ):
+                        continue
+
                     items.append(
                         CanonicalItem(
                             item_id=(
@@ -399,6 +509,13 @@ class ItemsTransformer(ItemsTransformerPort):
                     if not isinstance(
                         item_data,
                         dict,
+                    ):
+                        continue
+
+                    metadata_fields = dict(item_data)
+
+                    if not self._is_probable_commercial_item(
+                        metadata_fields,
                     ):
                         continue
 
