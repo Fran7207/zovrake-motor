@@ -1,4 +1,4 @@
-"""Transformador de la sección Condiciones."""
+
 
 from __future__ import annotations
 
@@ -301,7 +301,36 @@ class ConditionsTransformer(ConditionsTransformerPort):
                     table.get("table_role", "")
                 ).lower()
 
-                if table_role != "conditions":
+                table_roles_raw = table.get(
+                    "table_roles",
+                    (),
+                )
+
+                if isinstance(table_roles_raw, str):
+                    table_roles = {
+                        role.strip().lower()
+                        for role in table_roles_raw.split(",")
+                        if role.strip()
+                    }
+                elif isinstance(table_roles_raw, (list, tuple, set, frozenset)):
+                    table_roles = {
+                        self._normalize_text(role).lower()
+                        for role in table_roles_raw
+                        if self._normalize_text(role)
+                    }
+                else:
+                    table_roles = set()
+
+                # ``table_role`` conserva compatibilidad con modelos
+                # anteriores de un único rol. ``table_roles`` permite
+                # representar una tabla con múltiples funciones documentales
+                # simultáneas, por ejemplo: banking + conditions.
+                effective_roles = set(table_roles)
+
+                if table_role:
+                    effective_roles.add(table_role)
+
+                if "conditions" not in effective_roles:
                     continue
 
                 rows = table.get("rows", ())
@@ -370,6 +399,9 @@ class ConditionsTransformer(ConditionsTransformerPort):
                         "source_table_id": source_table_id,
                         "semantic_table_confidence": table_confidence,
                         "semantic_table_role": table_role,
+                        "semantic_table_roles": sorted(
+                            effective_roles
+                        ),
                         "semantic_table_role_confidence": role_confidence,
                         "semantic_table_role_evidence": list(
                             role_evidence
