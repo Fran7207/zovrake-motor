@@ -28,11 +28,66 @@ _HEADER_MARKERS = (
     "concepto",
 )
 
-_PROVIDER_PATTERNS = (
-    re.compile(
-        r"(?i)(?:raz[oó]n\s+social|proveedor|empresa|emisor)\s*[:\-]\s*(.+)"
-    ),
-    re.compile(r"(?i)(?:cotizaci[oó]n\s+de|oferta\s+de)\s+(.+)"),
+_PROVIDER_LABEL_PATTERN = re.compile(
+    r"(?i)"
+    r"(?:proveedor|emisor|vendedor|empresa\s+proveedora|"
+    r"raz[oó]n\s+social\s+del\s+proveedor|"
+    r"nombre\s+del\s+proveedor)"
+    r"\s*[:\-]\s*(?P<value>[^\n\r]+)"
+)
+
+_CUSTOMER_SECTION_PATTERN = re.compile(
+    r"(?i)\b(?:datos?\s+del\s+cliente|cliente|comprador|"
+    r"datos?\s+del\s+comprador)\b"
+)
+
+_PROVIDER_SECTION_PATTERN = re.compile(
+    r"(?i)\b(?:datos?\s+del\s+proveedor|"
+    r"datos?\s+del\s+emisor|"
+    r"datos?\s+de\s+la\s+empresa|"
+    r"informaci[oó]n\s+del\s+proveedor|"
+    r"informaci[oó]n\s+del\s+emisor)\b"
+)
+
+_LEGAL_ENTITY_PATTERN = re.compile(
+    r"(?i)\b"
+    r"[A-ZÁÉÍÓÚÜÑ0-9][A-ZÁÉÍÓÚÜÑ0-9&.,'()\/\-\s]{2,}"
+    r"\b(?:S\.?\s*A\.?\s*C\.?|"
+    r"S\.?\s*R\.?\s*L\.?|"
+    r"S\.?\s*A\.?|"
+    r"E\.?\s*I\.?\s*R\.?\s*L\.?|"
+    r"LTDA\.?|LIMITADA)\b"
+)
+
+_RUC_PATTERN = re.compile(
+    r"(?i)\bR\.?\s*U\.?\s*C\.?\s*[:\-]?\s*(?P<ruc>\d{11})\b"
+)
+
+_ISSUER_CONTEXT_MARKERS = (
+    "nuestros productos",
+    "nuestra empresa",
+    "ofrecemos",
+    "cotizamos",
+    "oferta",
+    "cotización",
+    "cotizacion",
+    "atentamente",
+    "quedamos de uds",
+    "quedamos de ustedes",
+    "ventas",
+    "ejecutivo comercial",
+    "asesor comercial",
+)
+
+_NON_ISSUER_CONTEXT_MARKERS = (
+    "datos del cliente",
+    "cliente",
+    "comprador",
+    "señores",
+    "dirigido a",
+    "facturar a",
+    "razón social del cliente",
+    "razon social del cliente",
 )
 
 _CURRENCY_PATTERNS = (
@@ -259,11 +314,18 @@ def resolve_evidence_documents(
                 f"{file_name}"
             )
 
-        provider_name = _detect_provider(
-            text,
-            document_label,
-            file_name,
+        provider_resolution = _resolve_provider_identity(
+            text=text,
+            document_label=document_label,
+            file_name=file_name,
         )
+
+        provider_name = str(
+            provider_resolution.get(
+                "provider_name",
+                "",
+            )
+        ).strip()
 
         items = _extract_items(text)
 
@@ -304,6 +366,31 @@ def resolve_evidence_documents(
                     "uploaded_at": metadata.get("uploaded_at"),
                     "file_size": metadata.get("file_size"),
                     "commercial_financial": financial_information,
+                    "provider_resolution": provider_resolution,
+                    "provider_resolved": bool(
+                        provider_resolution.get(
+                            "resolved",
+                            False,
+                        )
+                    ),
+                    "provider_confidence": float(
+                        provider_resolution.get(
+                            "confidence",
+                            0.0,
+                        )
+                    ),
+                    "provider_ruc": str(
+                        provider_resolution.get(
+                            "provider_ruc",
+                            "",
+                        )
+                    ),
+                    "provider_resolution_evidence": list(
+                        provider_resolution.get(
+                            "evidence",
+                            (),
+                        )
+                    ),
                     **(
                         {"pdf_processing": pdf_processing}
                         if pdf_processing
@@ -764,42 +851,423 @@ def _detect_provider(
     document_label: str,
     file_name: str,
 ) -> str:
-    for pattern in _PROVIDER_PATTERNS:
-        match = pattern.search(text)
+    """
+    Resuelve de forma conservadora la entidad emisora/proveedora.
 
-        if match:
-            candidate = match.group(1).strip(
-                " .-:\n\r\t"
+    Mantiene el contrato histórico ``str -> str`` para consumidores
+    existentes, mientras que la resolución completa queda disponible
+    mediante ``_resolve_provider_identity``.
+    """
+    resolution = _resolve_provider_identity(
+        text=text,
+        document_label=document_label,
+        file_name=file_name,
+    )
+
+    return str(
+        resolution.get(
+            "provider_name",
+            "",
+        )
+    ).strip()
+
+
+def _resolve_provider_identity(
+    *,
+    text: str,
+    document_label: str,
+    file_name: str,
+) -> dict[str, Any]:
+    """
+    Resuelve la identidad del emisor/proveedor a partir de evidencia
+    acumulada del documento.
+
+    La resolución considera:
+    - etiquetas explícitas de proveedor/emisor;
+    - secciones de proveedor y cliente;
+    - entidades jurídicas;
+    - RUC asociado;
+    - contexto lingüístico;
+    - cierre/firma del documento;
+    - separación frente al segundo candidato.
+
+    La función no inventa una identidad. Cuando la evidencia no supera
+    los umbrales de resolución, ``resolved`` permanece en False y
+    ``provider_name`` queda vacío.
+    """
+    if not text.strip():
+        return {
+            "provider_name": "",
+            "provider_ruc": "",
+            "resolved": False,
+            "confidence": 0.0,
+            "candidates": [],
+            "evidence": [],
+        }
+
+    lines = [
+        line.strip()
+        for line in text.splitlines()
+        if line.strip()
+    ]
+
+    candidates: dict[str, dict[str, Any]] = {}
+
+    def normalize_name(value: str) -> str:
+        return re.sub(
+            r"\s+",
+            " ",
+            value.strip(" \t\r\n:;,.-"),
+        )
+
+    def candidate_key(value: str) -> str:
+        return re.sub(
+            r"[^a-z0-9]",
+            "",
+            value.lower(),
+        )
+
+    def context_window(line_index: int) -> str:
+        start = max(0, line_index - 6)
+        end = min(len(lines), line_index + 7)
+        return "\n".join(lines[start:end]).lower()
+
+    def add_candidate(
+        *,
+        name: str,
+        line_index: int,
+        source: str,
+        base_score: float,
+        ruc: str = "",
+    ) -> None:
+        normalized_name = normalize_name(name)
+
+        if not normalized_name:
+            return
+
+        rejected_phrases = {
+            "nuestros productos",
+            "nuestros servicios",
+            "nuestro producto",
+            "nuestra empresa",
+            "la empresa",
+            "productos",
+            "servicios",
+        }
+
+        if normalized_name.lower() in rejected_phrases:
+            return
+
+        key = candidate_key(normalized_name)
+
+        if not key:
+            return
+
+        context = context_window(line_index)
+
+        entry = candidates.setdefault(
+            key,
+            {
+                "name": normalized_name,
+                "score": 0.0,
+                "ruc": "",
+                "evidence": [],
+                "line_indexes": [],
+                "sources": set(),
+            },
+        )
+
+        score = base_score
+
+        if re.search(
+            r"(?i)\b(?:S\.?\s*A\.?\s*C\.?|"
+            r"S\.?\s*R\.?\s*L\.?|"
+            r"S\.?\s*A\.?|"
+            r"E\.?\s*I\.?\s*R\.?\s*L\.?|"
+            r"LTDA\.?|LIMITADA)\b",
+            normalized_name,
+        ):
+            score += 8.0
+            entry["evidence"].append(
+                f"{source}:legal_entity"
             )
 
-            if candidate:
-                return candidate[:120]
+        for marker in _ISSUER_CONTEXT_MARKERS:
+            if marker in context:
+                score += 2.5
+                entry["evidence"].append(
+                    f"{source}:issuer_context:{marker}"
+                )
 
-    base = re.sub(
-        r"(?i)^cotizaci[oó]n[\s\-_]*",
-        "",
-        document_label,
-    ).strip()
+        for marker in _NON_ISSUER_CONTEXT_MARKERS:
+            if marker in context:
+                score -= 7.0
+                entry["evidence"].append(
+                    f"{source}:non_issuer_context:{marker}"
+                )
 
-    base = re.sub(
-        r"\.pdf$",
-        "",
-        base,
-        flags=re.IGNORECASE,
-    ).strip()
+        if _PROVIDER_SECTION_PATTERN.search(context):
+            score += 8.0
+            entry["evidence"].append(
+                f"{source}:provider_section"
+            )
 
-    if base:
-        return base[:120]
+        if _CUSTOMER_SECTION_PATTERN.search(context):
+            score -= 12.0
+            entry["evidence"].append(
+                f"{source}:customer_section"
+            )
 
-    return (
-        re.sub(
-            r"\.pdf$",
-            "",
-            file_name,
-            flags=re.IGNORECASE,
-        )[:120]
-        or "Proveedor"
+        if ruc:
+            score += 7.0
+            entry["ruc"] = ruc
+            entry["evidence"].append(
+                f"{source}:ruc:{ruc}"
+            )
+
+        if line_index not in entry["line_indexes"]:
+            entry["line_indexes"].append(line_index)
+        else:
+            score -= 0.25
+
+        entry["score"] += score
+        entry["sources"].add(source)
+
+    # 1. Etiquetas explícitas.
+    for line_index, line in enumerate(lines):
+        match = _PROVIDER_LABEL_PATTERN.search(line)
+
+        if not match:
+            continue
+
+        ruc_match = _RUC_PATTERN.search(
+            context_window(line_index)
+        )
+
+        add_candidate(
+            name=match.group("value"),
+            line_index=line_index,
+            source="explicit_provider_label",
+            base_score=16.0,
+            ruc=(
+                ruc_match.group("ruc")
+                if ruc_match
+                else ""
+            ),
+        )
+
+    # 2. Entidades jurídicas encontradas en el documento.
+    for line_index, line in enumerate(lines):
+        for match in _LEGAL_ENTITY_PATTERN.finditer(line):
+            candidate = normalize_name(match.group(0))
+
+            candidate = re.split(
+                r"(?i)\b(?:tel|teléfono|telefono|celular|email|"
+                r"correo|dirección|direccion)\b",
+                candidate,
+                maxsplit=1,
+            )[0].strip()
+
+            ruc_match = _RUC_PATTERN.search(
+                context_window(line_index)
+            )
+
+            add_candidate(
+                name=candidate,
+                line_index=line_index,
+                source="legal_entity_scan",
+                base_score=4.0,
+                ruc=(
+                    ruc_match.group("ruc")
+                    if ruc_match
+                    else ""
+                ),
+            )
+
+    # 3. Referencias explícitas del tipo "cotización de XYZ".
+    offer_pattern = re.compile(
+        r"(?i)\b(?:cotizaci[oó]n|oferta)\s+de\s+(?P<value>.+)"
     )
+
+    for line_index, line in enumerate(lines):
+        match = offer_pattern.search(line)
+
+        if not match:
+            continue
+
+        legal_match = _LEGAL_ENTITY_PATTERN.search(
+            match.group("value")
+        )
+
+        if not legal_match:
+            continue
+
+        ruc_match = _RUC_PATTERN.search(
+            context_window(line_index)
+        )
+
+        add_candidate(
+            name=legal_match.group(0),
+            line_index=line_index,
+            source="offer_issuer_reference",
+            base_score=11.0,
+            ruc=(
+                ruc_match.group("ruc")
+                if ruc_match
+                else ""
+            ),
+        )
+
+    # 4. Entidades próximas a una firma o cierre.
+    signature_markers = (
+        "atentamente",
+        "cordialmente",
+        "saludos",
+        "quedamos de uds",
+        "quedamos de ustedes",
+    )
+
+    for marker in signature_markers:
+        for marker_index, line in enumerate(lines):
+            if marker not in line.lower():
+                continue
+
+            end = min(
+                len(lines),
+                marker_index + 8,
+            )
+
+            for line_index in range(
+                marker_index,
+                end,
+            ):
+                for match in _LEGAL_ENTITY_PATTERN.finditer(
+                    lines[line_index]
+                ):
+                    ruc_match = _RUC_PATTERN.search(
+                        context_window(line_index)
+                    )
+
+                    add_candidate(
+                        name=match.group(0),
+                        line_index=line_index,
+                        source="signature_context",
+                        base_score=10.0,
+                        ruc=(
+                            ruc_match.group("ruc")
+                            if ruc_match
+                            else ""
+                        ),
+                    )
+
+    ranked = sorted(
+        candidates.values(),
+        key=lambda candidate: (
+            candidate["score"],
+            len(candidate["evidence"]),
+            -(
+                min(candidate["line_indexes"])
+                if candidate["line_indexes"]
+                else 10**9
+            ),
+        ),
+        reverse=True,
+    )
+
+    if not ranked:
+        return {
+            "provider_name": "",
+            "provider_ruc": "",
+            "resolved": False,
+            "confidence": 0.0,
+            "candidates": [],
+            "evidence": [],
+        }
+
+    best = ranked[0]
+
+    second_score = (
+        ranked[1]["score"]
+        if len(ranked) > 1
+        else 0.0
+    )
+
+    score_gap = max(
+        best["score"] - second_score,
+        0.0,
+    )
+
+    absolute_confidence = min(
+        max(best["score"], 0.0) / 40.0,
+        1.0,
+    )
+
+    separation_confidence = min(
+        score_gap / max(abs(best["score"]), 1.0),
+        1.0,
+    )
+
+    evidence_confidence = min(
+        len(set(best["evidence"])) / 6.0,
+        1.0,
+    )
+
+    confidence = round(
+        absolute_confidence * 0.45
+        + separation_confidence * 0.30
+        + evidence_confidence * 0.25,
+        4,
+    )
+
+    resolved = (
+        best["score"] >= 8.0
+        and confidence >= 0.58
+    )
+
+    provider_name = (
+        best["name"]
+        if resolved
+        else ""
+    )
+
+    provider_ruc = (
+        best["ruc"]
+        if resolved
+        else ""
+    )
+
+    candidate_snapshot = [
+        {
+            "name": candidate["name"],
+            "score": round(
+                candidate["score"],
+                4,
+            ),
+            "ruc": candidate["ruc"],
+            "evidence": list(
+                dict.fromkeys(
+                    candidate["evidence"]
+                )
+            ),
+            "sources": sorted(
+                candidate["sources"]
+            ),
+        }
+        for candidate in ranked
+    ]
+
+    return {
+        "provider_name": provider_name,
+        "provider_ruc": provider_ruc,
+        "resolved": resolved,
+        "confidence": confidence if resolved else 0.0,
+        "candidates": candidate_snapshot,
+        "evidence": list(
+            dict.fromkeys(
+                best["evidence"]
+            )
+        ),
+    }
 
 
 def _detect_currency(text: str) -> str:
