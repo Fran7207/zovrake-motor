@@ -14,6 +14,9 @@ from zovrake_motor.comprehension.pdf_processing.exceptions import (
 from zovrake_motor.comprehension.pdf_processing.processor import (
     PDFDocumentProcessor,
 )
+from zovrake_motor.comprehension.document_knowledge_builder import (
+    DocumentKnowledgeBuilder,
+)
 
 
 _HEADER_MARKERS = (
@@ -366,6 +369,14 @@ def resolve_evidence_documents(
                     "uploaded_at": metadata.get("uploaded_at"),
                     "file_size": metadata.get("file_size"),
                     "commercial_financial": financial_information,
+                    "document_knowledge": (
+                        pdf_processing.get("document_knowledge")
+                        if isinstance(
+                            pdf_processing,
+                            dict,
+                        )
+                        else None
+                    ),
                     "provider_resolution": provider_resolution,
                     "provider_resolved": bool(
                         provider_resolution.get(
@@ -566,6 +577,13 @@ def _decode_document_content(
                 pdf_bytes=raw,
             )
 
+            # La extracción física ya fue realizada por PDFDocumentProcessor.
+            # Este paso unifica su resultado en DocumentKnowledge sin
+            # volver a abrir ni volver a extraer el PDF.
+            document_knowledge = DocumentKnowledgeBuilder().build(
+                processed,
+            )
+
             tables = tuple(
                 table.to_dict()
                 for table in processed.tables
@@ -635,6 +653,7 @@ def _decode_document_content(
                 "pdf_metadata": dict(
                     processed.pdf_metadata
                 ),
+                "document_knowledge": document_knowledge.to_dict(),
             }
 
             return (
