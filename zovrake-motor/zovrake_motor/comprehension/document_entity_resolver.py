@@ -97,6 +97,16 @@ class DocumentEntityResolver:
         r"(?P<value>.+?)\s*$"
     )
 
+    _HEADER_CUSTOMER_MARKER = re.compile(
+        r"(?i)\b(?:ref|referencia|obra|proyecto|atencion|atención)\s*[:\-]?"
+    )
+
+    _ISSUER_TRANSITION = re.compile(
+        r"(?i)\b(?:de\s+nuestra\s+consideraci[oó]n|"
+        r"nos\s+dirigimos|cotizaci[oó]n\s+de\s+nuestros|"
+        r"cotizamos\s+nuestros|ofrecemos\s+nuestros)\b"
+    )
+
     _ISSUER_PHRASES = (
         "nuestra empresa",
         "nuestros productos",
@@ -175,6 +185,11 @@ class DocumentEntityResolver:
         # el texto completo permite recuperar entidades que fueron
         # separadas por el layout o por tablas distintas.
         # ---------------------------------------------------------
+        self._collect_header_customer_candidates(
+            lines=lines,
+            candidates=candidates,
+        )
+
         self._collect_text_candidates(
             lines=lines,
             role_context=role_context,
@@ -188,6 +203,12 @@ class DocumentEntityResolver:
         resolved_candidates = (
             self._select_resolved_candidates(
                 ranked
+            )
+        )
+
+        resolved_candidates = (
+            self._remove_cross_role_duplicates(
+                resolved_candidates
             )
         )
 
@@ -409,18 +430,46 @@ class DocumentEntityResolver:
             )
 
             if payee_match:
+                provider_name = self._clean_name(
+                    payee_match.group(
+                        "value"
+                    )
+                )
+
                 self._add_candidate(
                     role="provider",
-                    name=self._clean_name(
-                        payee_match.group(
-                            "value"
-                        )
-                    ),
+                    name=provider_name,
                     region=region,
                     source="explicit_payee",
-                    score=32.0,
+                    score=52.0,
                     candidates=candidates,
                 )
+
+                region_ruc = self._find_nearby_identifier(
+                    lines=lines,
+                    start=max(0, lines.index(line) - 1),
+                    end=min(
+                        len(lines),
+                        lines.index(line) + 3,
+                    ),
+                )
+
+                if provider_name and region_ruc:
+                    state = candidates.get(
+                        (
+                            "provider",
+                            self._entity_key(
+                                provider_name
+                            ),
+                        )
+                    )
+
+                    if state is not None:
+                        state["identifier"] = region_ruc
+                        state["score"] += 10.0
+                        state["evidence"].append(
+                            f"payee_tax_id:{region_ruc}"
+                        )
 
             ruc_match = self._RUC.search(
                 line
@@ -435,6 +484,161 @@ class DocumentEntityResolver:
                     region=region,
                     candidates=candidates,
                 )
+
+    def _collect_header_customer_candidates(
+        self,
+        *,
+        lines: list[str],
+        candidates: dict[
+            tuple[str, str],
+            dict[str, Any],
+        ],
+    ) -> None:
+        """
+        Recupera el destinatario empresarial de documentos donde el cliente
+        aparece en el encabezado sin la etiqueta literal ``CLIENTE``.
+
+        Patrón observado y generalizable:
+            razón social / empresa + RUC
+            ...
+            referencia / obra
+            ...
+            de nuestra consideración / nos dirigimos / cotización de nuestros
+
+        La evidencia temprana se considera contexto de destinatario porque
+        aparece antes de la transición explícita al discurso del emisor.
+        """
+        if not lines:
+            return
+
+        search_limit = min(
+            len(lines),
+            14,
+        )
+
+        issuer_transition_index = next(
+            (
+                index
+                for index, line in enumerate(
+                    lines[:search_limit]
+                )
+                if self._ISSUER_TRANSITION.search(
+                    line
+                )
+            ),
+            search_limit,
+        )
+
+        if issuer_transition_index <= 0:
+            return
+
+        for index in range(
+            issuer_transition_index
+        ):
+            line = lines[index]
+
+            # Debe existir una entidad legal en una ventana temprana.
+            matches = list(
+                self._LEGAL_SUFFIX.finditer(
+                    line
+                )
+            )
+
+            if not matches:
+                continue
+
+            ruc = self._find_nearby_identifier(
+                lines=lines,
+                start=max(0, index - 1),
+                end=min(
+                    issuer_transition_index,
+                    index + 3,
+                ),
+            )
+
+            if not ruc:
+                continue
+
+            for match in matches:
+                candidate = line[
+                    :match.end()
+                ]
+
+                candidate = re.sub(
+                    r"(?i)^\s*(?:raz[oó]n\s+social|"
+                    r"nombre|empresa)\s*[:\-]\s*",
+                    "",
+                    candidate,
+                )
+
+                candidate = self._clean_name(
+                    candidate
+                )
+
+                if not self._looks_like_legal_entity(
+                    candidate
+                ):
+                    continue
+
+                self._add_candidate(
+                    role="customer",
+                    name=candidate,
+                    region=None,
+                    source="header_recipient_block",
+                    score=28.0,
+                    candidates=candidates,
+                )
+
+                resolved_key = (
+                    "customer",
+                    self._entity_key(
+                        candidate
+                    ),
+                )
+
+                candidate_state = candidates.get(
+                    resolved_key
+                )
+
+                if candidate_state is not None:
+                    candidate_state["identifier"] = ruc
+                    candidate_state["score"] += 12.0
+                    candidate_state["evidence"].append(
+                        f"header_tax_id:{ruc}"
+                    )
+
+                    candidate_state["attributes"][
+                        "source_line_index"
+                    ] = index
+
+                    candidate_state["attributes"][
+                        "document_recipient_evidence"
+                    ] = (
+                        "entity_and_tax_id_before_"
+                        "issuer_transition"
+                    )
+
+    @staticmethod
+    def _find_nearby_identifier(
+        *,
+        lines: list[str],
+        start: int,
+        end: int,
+    ) -> str:
+        for index in range(
+            max(0, start),
+            min(len(lines), end),
+        ):
+            match = DocumentEntityResolver._RUC.search(
+                lines[index]
+            )
+
+            if match:
+                return match.group(
+                    "value"
+                )
+
+        return ""
 
     def _collect_text_candidates(
         self,
@@ -501,18 +705,46 @@ class DocumentEntityResolver:
             )
 
             if payee_match:
+                provider_name = self._clean_name(
+                    payee_match.group(
+                        "value"
+                    )
+                )
+
                 self._add_candidate(
                     role="provider",
-                    name=self._clean_name(
-                        payee_match.group(
-                            "value"
-                        )
-                    ),
+                    name=provider_name,
                     region=None,
                     source="full_text_payee",
-                    score=34.0,
+                    score=40.0,
                     candidates=candidates,
                 )
+
+                provider_ruc = self._find_nearby_identifier(
+                    lines=lines,
+                    start=max(0, index - 1),
+                    end=min(
+                        len(lines),
+                        index + 3,
+                    ),
+                )
+
+                if provider_name and provider_ruc:
+                    state = candidates.get(
+                        (
+                            "provider",
+                            self._entity_key(
+                                provider_name
+                            ),
+                        )
+                    )
+
+                    if state is not None:
+                        state["identifier"] = provider_ruc
+                        state["score"] += 10.0
+                        state["evidence"].append(
+                            f"payee_tax_id:{provider_ruc}"
+                        )
 
             issuer_context = self._nearby_contains(
                 lines,
@@ -942,6 +1174,116 @@ class DocumentEntityResolver:
 
         return selected
 
+    @classmethod
+    def _remove_cross_role_duplicates(
+        cls,
+        candidates: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """
+        Evita publicar la misma identidad con roles incompatibles.
+
+        Cuando dos candidatos comparten RUC, o comparten nombre normalizado
+        si no existe RUC, se consideran la misma identidad documental y solo
+        se conserva el rol mejor respaldado.
+        """
+        grouped: dict[str, list[dict[str, Any]]] = {}
+
+        for candidate in candidates:
+            identifier = str(
+                candidate.get(
+                    "identifier",
+                    "",
+                )
+            ).strip()
+
+            identity_key = (
+                f"id:{identifier}"
+                if identifier
+                else (
+                    "name:"
+                    + cls._entity_key(
+                        candidate.get(
+                            "name",
+                            "",
+                        )
+                    )
+                )
+            )
+
+            grouped.setdefault(
+                identity_key,
+                [],
+            ).append(
+                candidate
+            )
+
+        selected: list[dict[str, Any]] = []
+
+        for group in grouped.values():
+            ranked_group = sorted(
+                group,
+                key=lambda candidate: (
+                    candidate.get(
+                        "score",
+                        0.0,
+                    ),
+                    cls._explicit_role_evidence_strength(
+                        candidate
+                    ),
+                    len(
+                        candidate.get(
+                            "evidence",
+                            (),
+                        )
+                    ),
+                ),
+                reverse=True,
+            )
+
+            selected.append(
+                ranked_group[0]
+            )
+
+        return selected
+
+    @staticmethod
+    def _explicit_role_evidence_strength(
+        candidate: dict[str, Any],
+    ) -> float:
+        role = candidate.get(
+            "role",
+            "",
+        )
+
+        evidence = set(
+            candidate.get(
+                "evidence",
+                (),
+            )
+        )
+
+        score = 0.0
+
+        if "explicit_role_label" in evidence:
+            score += 20.0
+
+        if (
+            role == "provider"
+            and (
+                "explicit_payee" in evidence
+                or "full_text_payee" in evidence
+            )
+        ):
+            score += 30.0
+
+        if (
+            role == "customer"
+            and "header_recipient_block" in evidence
+        ):
+            score += 30.0
+
+        return score
+
     @staticmethod
     def _label_role(
         label: str,
@@ -1152,7 +1494,7 @@ class DocumentEntityResolver:
         cleaned = " ".join(
             str(value)
             .strip(
-                " \t\r\n:;,.()"
+                " \t\r\n:;,"
             )
             .split()
         )
