@@ -322,6 +322,31 @@ class ItemsTransformer(ItemsTransformerPort):
                         or table_id
                     )
 
+                    table_role = str(
+                        semantic_table.get(
+                            "table_role",
+                            "unknown",
+                        )
+                    ).strip().lower() or "unknown"
+
+                    table_role_confidence = semantic_table.get(
+                        "table_role_confidence",
+                        0.0,
+                    )
+
+                    table_role_evidence = semantic_table.get(
+                        "table_role_evidence",
+                        (),
+                    )
+
+                    if not isinstance(
+                        table_role_evidence,
+                        (list, tuple),
+                    ):
+                        table_role_evidence = (
+                            str(table_role_evidence),
+                        )
+
                     item_fields: dict[str, Any] = {
                         "semantic_table_id": table_id,
                         "semantic_table_confidence": (
@@ -335,6 +360,13 @@ class ItemsTransformer(ItemsTransformerPort):
                         ),
                         "semantic_columns": list(
                             column_keys
+                        ),
+                        "document_semantic_role": table_role,
+                        "document_semantic_role_confidence": (
+                            table_role_confidence
+                        ),
+                        "document_semantic_role_evidence": list(
+                            table_role_evidence
                         ),
                         "values": fields,
                     }
@@ -472,6 +504,9 @@ class ItemsTransformer(ItemsTransformerPort):
                                     "physical_table"
                                 ),
                                 "table_index": table_index,
+                                "document_semantic_role": "unknown",
+                                "document_semantic_role_confidence": 0.0,
+                                "document_semantic_role_evidence": [],
                                 "values": values,
                             },
                         ),
