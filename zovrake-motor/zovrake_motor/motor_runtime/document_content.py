@@ -23,6 +23,9 @@ from zovrake_motor.comprehension.document_semantic_analyzer import (
 from zovrake_motor.comprehension.document_entity_resolver import (
     DocumentEntityResolver,
 )
+from zovrake_motor.comprehension.document_fact_extractor import (
+    DocumentFactExtractor,
+)
 
 
 _HEADER_MARKERS = (
@@ -602,6 +605,10 @@ def _decode_document_content(
             # las capas canónicas. El resolver solo consume la evidencia
             # ya extraída y no vuelve a leer el PDF.
             document_knowledge = DocumentEntityResolver().resolve(
+                document_knowledge,
+            )
+
+            document_knowledge = DocumentFactExtractor().extract(
                 document_knowledge,
             )
 
