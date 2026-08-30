@@ -36,14 +36,79 @@ _PROVIDER_PATTERNS = (
 )
 
 _CURRENCY_PATTERNS = (
-    re.compile(r"(?i)\b(PEN|USD|EUR|S/\.?|US\$|\$)\b"),
+    re.compile(
+        r"(?i)\b(?P<code>PEN|USD|EUR|GBP|COP|MXN|CLP|ARS|BOB|BRL|"
+        r"CAD|AUD|CHF|JPY|CNY|INR)\b"
+    ),
+    re.compile(
+        r"(?i)(?P<symbol>S\/\.?|US\$|U\$S|\$|€|£|¥|Bs\.?|Bs)"
+    ),
 )
 
-_TOTAL_PATTERNS = (
-    re.compile(
-        r"(?i)(?:total|importe\s+total|monto\s+total)"
-        r"\s*[:\-]?\s*([0-9][0-9.,]*)"
+_FINANCIAL_LABEL_PATTERNS = {
+    "subtotal": (
+        re.compile(
+            r"(?i)\bsub[\s\-]?total\b"
+            r"\s*[:\-]?\s*(?P<value>[^\n\r]+)"
+        ),
     ),
+    "discount": (
+        re.compile(
+            r"(?i)\bdescuent(?:o|os)\b"
+            r"\s*[:\-]?\s*(?P<value>[^\n\r]+)"
+        ),
+        re.compile(
+            r"(?i)\bdesc\.?\b"
+            r"\s*[:\-]?\s*(?P<value>[^\n\r]+)"
+        ),
+    ),
+    "tax": (
+        re.compile(
+            r"(?i)\b(?:igv|iva|impuesto(?:s)?)\b"
+            r"\s*[:\-]?\s*(?P<value>[^\n\r]+)"
+        ),
+    ),
+    "total": (
+        re.compile(
+            r"(?i)\b(?:total\s+a\s+pagar|importe\s+total|monto\s+total)\b"
+            r"\s*[:\-]?\s*(?P<value>[^\n\r]+)"
+        ),
+        re.compile(
+            r"(?i)\btotal\b"
+            r"\s*[:\-]?\s*(?P<value>[^\n\r]+)"
+        ),
+    ),
+    "additional_cost": (
+        re.compile(
+            r"(?i)\b(?:flete|transporte|env[ií]o|costo\s+adicional|"
+            r"costos?\s+adicionales|recargo|cargo\s+adicional)\b"
+            r"\s*[:\-]?\s*(?P<value>[^\n\r]+)"
+        ),
+    ),
+    "withholding": (
+        re.compile(
+            r"(?i)\b(?:retenci[oó]n|retenciones)\b"
+            r"\s*[:\-]?\s*(?P<value>[^\n\r]+)"
+        ),
+    ),
+    "perception": (
+        re.compile(
+            r"(?i)\b(?:percepci[oó]n|percepciones)\b"
+            r"\s*[:\-]?\s*(?P<value>[^\n\r]+)"
+        ),
+    ),
+    "exchange_rate": (
+        re.compile(
+            r"(?i)\b(?:tipo\s+de\s+cambio|exchange\s+rate)\b"
+            r"\s*[:\-]?\s*(?P<value>[^\n\r]+)"
+        ),
+    ),
+}
+
+_NUMBER_PATTERN = re.compile(
+    r"(?<![\w])"
+    r"(?:[-+]?\d{1,3}(?:[.,]\d{3})+|[-+]?\d+(?:[.,]\d+)?)"
+    r"(?![\w])"
 )
 
 _PAYMENT_PATTERNS = (
@@ -212,6 +277,11 @@ def resolve_evidence_documents(
         if not items and tables:
             items = _tables_to_items(tables)
 
+        financial_information = _extract_financial_information(
+            text,
+            semantic_tables=semantic_tables,
+        )
+
         currency = _detect_currency(text)
         total = _detect_total(text)
         payment = _detect_payment_terms(text)
@@ -233,6 +303,7 @@ def resolve_evidence_documents(
                 metadata={
                     "uploaded_at": metadata.get("uploaded_at"),
                     "file_size": metadata.get("file_size"),
+                    "commercial_financial": financial_information,
                     **(
                         {"pdf_processing": pdf_processing}
                         if pdf_processing
@@ -732,37 +803,411 @@ def _detect_provider(
 
 
 def _detect_currency(text: str) -> str:
+    """
+    Detecta la moneda documental dominante sin depender de la primera
+    coincidencia encontrada.
+
+    Se priorizan códigos explícitos y posteriormente símbolos monetarios.
+    Mantiene el contrato histórico ``str -> str``.
+    """
+    if not text:
+        return ""
+
+    code_map = {
+        "PEN": "PEN",
+        "USD": "USD",
+        "EUR": "EUR",
+        "GBP": "GBP",
+        "COP": "COP",
+        "MXN": "MXN",
+        "CLP": "CLP",
+        "ARS": "ARS",
+        "BOB": "BOB",
+        "BRL": "BRL",
+        "CAD": "CAD",
+        "AUD": "AUD",
+        "CHF": "CHF",
+        "JPY": "JPY",
+        "CNY": "CNY",
+        "INR": "INR",
+    }
+
+    symbol_map = {
+        "S/": "PEN",
+        "S/.": "PEN",
+        "US$": "USD",
+        "U$S": "USD",
+        "$": "USD",
+        "€": "EUR",
+        "£": "GBP",
+        "¥": "JPY",
+        "BS": "BOB",
+        "BS.": "BOB",
+    }
+
+    scores: dict[str, float] = {}
+
     for pattern in _CURRENCY_PATTERNS:
+        for match in pattern.finditer(text):
+            groups = match.groupdict()
+            token = (
+                groups.get("code")
+                or groups.get("symbol")
+                or ""
+            ).strip()
+
+            if not token:
+                continue
+
+            normalized = token.upper().replace(" ", "")
+            currency = code_map.get(normalized)
+
+            if currency is None:
+                currency = symbol_map.get(normalized)
+
+            if currency is None:
+                currency = symbol_map.get(token)
+
+            if currency is None:
+                continue
+
+            weight = 3.0 if groups.get("code") else 1.0
+            scores[currency] = scores.get(currency, 0.0) + weight
+
+    if not scores:
+        return ""
+
+    return max(scores, key=scores.get)
+
+
+def _detect_total(text: str) -> str:
+    """
+    Detecta el total principal de forma conservadora.
+
+    Prioriza expresiones inequívocas antes que la etiqueta genérica
+    ``total``. Mantiene el formato numérico encontrado.
+    """
+    if not text:
+        return ""
+
+    for pattern in _FINANCIAL_LABEL_PATTERNS["total"]:
         match = pattern.search(text)
 
         if not match:
             continue
 
-        token = (
-            match.group(1)
-            .upper()
-            .replace(".", "")
+        raw_value = match.group("value").strip()
+        number_match = _NUMBER_PATTERN.search(raw_value)
+
+        if number_match:
+            return number_match.group(0).strip()
+
+    return ""
+
+
+def _extract_financial_information(
+    text: str,
+    *,
+    semantic_tables: tuple[dict[str, Any], ...] = (),
+) -> dict[str, Any]:
+    """
+    Construye información financiera documental rica y trazable.
+
+    Conserva valor original, valor numérico normalizado cuando es posible,
+    moneda, tipo de hecho, origen y referencia.
+
+    No convierte monedas y no presupone una estructura financiera única.
+    """
+
+    fact_types = (
+        "subtotal",
+        "discount",
+        "tax",
+        "total",
+        "additional_cost",
+        "withholding",
+        "perception",
+        "exchange_rate",
+    )
+
+    facts: dict[str, list[dict[str, Any]]] = {
+        fact_type: []
+        for fact_type in fact_types
+    }
+
+    currencies: list[dict[str, Any]] = []
+
+    def normalize_number(value: str) -> float | None:
+        cleaned = re.sub(r"[^\d,.\-+]", "", value.strip())
+
+        if not cleaned:
+            return None
+
+        if "," in cleaned and "." in cleaned:
+            if cleaned.rfind(",") > cleaned.rfind("."):
+                cleaned = cleaned.replace(".", "")
+                cleaned = cleaned.replace(",", ".")
+            else:
+                cleaned = cleaned.replace(",", "")
+        elif "," in cleaned:
+            decimal_part = cleaned.rsplit(",", 1)[-1]
+
+            if len(decimal_part) <= 2:
+                cleaned = cleaned.replace(",", ".")
+            else:
+                cleaned = cleaned.replace(",", "")
+        elif "." in cleaned:
+            parts = cleaned.split(".")
+
+            if (
+                len(parts) > 2
+                and all(len(part) == 3 for part in parts[1:])
+            ):
+                cleaned = "".join(parts)
+
+        try:
+            return float(cleaned)
+        except ValueError:
+            return None
+
+    def detect_currency(value: str) -> str:
+        normalized = value.upper()
+
+        for code in (
+            "PEN",
+            "USD",
+            "EUR",
+            "GBP",
+            "COP",
+            "MXN",
+            "CLP",
+            "ARS",
+            "BOB",
+            "BRL",
+            "CAD",
+            "AUD",
+            "CHF",
+            "JPY",
+            "CNY",
+            "INR",
+        ):
+            if code in normalized:
+                return code
+
+        if "S/" in normalized:
+            return "PEN"
+        if "US$" in normalized or "U$S" in normalized:
+            return "USD"
+        if "$" in value:
+            return "USD"
+        if "€" in value:
+            return "EUR"
+        if "£" in value:
+            return "GBP"
+        if "¥" in value:
+            return "JPY"
+        if "BS." in normalized or re.search(r"\bBS\b", normalized):
+            return "BOB"
+
+        return ""
+
+    def append_fact(
+        *,
+        fact_type: str,
+        raw_value: str,
+        source_kind: str,
+        source_reference: str,
+    ) -> None:
+        value = raw_value.strip()
+
+        if not value:
+            return
+
+        number_match = _NUMBER_PATTERN.search(value)
+
+        fact = {
+            "fact_type": fact_type,
+            "raw_value": value,
+            "normalized_value": (
+                normalize_number(number_match.group(0))
+                if number_match
+                else None
+            ),
+            "currency": detect_currency(value),
+            "source_kind": source_kind,
+            "source_reference": source_reference,
+        }
+
+        facts[fact_type].append(fact)
+
+        if fact["currency"]:
+            currencies.append(
+                {
+                    "currency": fact["currency"],
+                    "raw_value": value,
+                    "source_kind": source_kind,
+                    "source_reference": source_reference,
+                }
+            )
+
+    # -------------------------------------------------------------
+    # Texto documental.
+    # -------------------------------------------------------------
+    for line_number, line in enumerate(
+        text.splitlines(),
+        start=1,
+    ):
+        stripped = line.strip()
+
+        if not stripped:
+            continue
+
+        for fact_type, patterns in _FINANCIAL_LABEL_PATTERNS.items():
+            for pattern in patterns:
+                match = pattern.search(stripped)
+
+                if not match:
+                    continue
+
+                append_fact(
+                    fact_type=fact_type,
+                    raw_value=match.group("value"),
+                    source_kind="text",
+                    source_reference=f"line:{line_number}",
+                )
+                break
+
+    # -------------------------------------------------------------
+    # Tablas semánticas.
+    # -------------------------------------------------------------
+    for table_index, table in enumerate(semantic_tables):
+        if not isinstance(table, dict):
+            continue
+
+        table_id = str(
+            table.get(
+                "table_id",
+                f"semantic-table-{table_index + 1}",
+            )
+        ).strip()
+
+        page_number = table.get("source_page_number")
+        rows = table.get("rows", ())
+
+        if not isinstance(rows, (list, tuple)):
+            continue
+
+        for row_index, row in enumerate(rows):
+            if not isinstance(row, dict):
+                continue
+
+            for key, raw_value in row.items():
+                value = (
+                    ""
+                    if raw_value is None
+                    else str(raw_value).strip()
+                )
+
+                if not value:
+                    continue
+
+                normalized_key = str(key).strip().lower()
+
+                source_reference = (
+                    f"{table_id}/"
+                    f"page:{page_number}/"
+                    f"row:{row_index}/"
+                    f"column:{normalized_key}"
+                )
+
+                fact_type = {
+                    "subtotal": "subtotal",
+                    "discount": "discount",
+                    "descuento": "discount",
+                    "tax": "tax",
+                    "igv": "tax",
+                    "iva": "tax",
+                    "impuesto": "tax",
+                    "total": "total",
+                    "total_amount": "total",
+                    "additional_cost": "additional_cost",
+                    "costo_adicional": "additional_cost",
+                    "withholding": "withholding",
+                    "retention": "withholding",
+                    "perception": "perception",
+                    "exchange_rate": "exchange_rate",
+                }.get(normalized_key)
+
+                if fact_type:
+                    append_fact(
+                        fact_type=fact_type,
+                        raw_value=value,
+                        source_kind="semantic_table",
+                        source_reference=source_reference,
+                    )
+                elif normalized_key in {"currency", "moneda"}:
+                    currency = detect_currency(value)
+
+                    if currency:
+                        currencies.append(
+                            {
+                                "currency": currency,
+                                "raw_value": value,
+                                "source_kind": "semantic_table",
+                                "source_reference": source_reference,
+                            }
+                        )
+
+    # -------------------------------------------------------------
+    # Dedupe determinista.
+    # -------------------------------------------------------------
+    for fact_type, values in facts.items():
+        unique: list[dict[str, Any]] = []
+        seen: set[tuple[Any, ...]] = set()
+
+        for fact in values:
+            signature = (
+                fact["fact_type"],
+                fact["raw_value"],
+                fact["normalized_value"],
+                fact["currency"],
+                fact["source_kind"],
+                fact["source_reference"],
+            )
+
+            if signature in seen:
+                continue
+
+            seen.add(signature)
+            unique.append(fact)
+
+        facts[fact_type] = unique
+
+    unique_currencies: list[dict[str, Any]] = []
+    seen_currencies: set[tuple[str, str, str]] = set()
+
+    for currency_fact in currencies:
+        signature = (
+            currency_fact["currency"],
+            currency_fact["raw_value"],
+            currency_fact["source_reference"],
         )
 
-        if token in {"S/", "S"}:
-            return "PEN"
+        if signature in seen_currencies:
+            continue
 
-        if token in {"US$", "$"}:
-            return "USD"
+        seen_currencies.add(signature)
+        unique_currencies.append(currency_fact)
 
-        return token
-
-    return ""
-
-
-def _detect_total(text: str) -> str:
-    for pattern in _TOTAL_PATTERNS:
-        match = pattern.search(text)
-
-        if match:
-            return match.group(1).strip()
-
-    return ""
+    return {
+        "currencies": unique_currencies,
+        "facts": facts,
+        "currency_count": len(unique_currencies),
+        "fact_count": sum(
+            len(values)
+            for values in facts.values()
+        ),
+    }
 
 
 def _detect_payment_terms(text: str) -> str:
