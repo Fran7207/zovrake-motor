@@ -20,6 +20,9 @@ from zovrake_motor.comprehension.document_knowledge_builder import (
 from zovrake_motor.comprehension.document_semantic_analyzer import (
     DocumentSemanticAnalyzer,
 )
+from zovrake_motor.comprehension.document_entity_resolver import (
+    DocumentEntityResolver,
+)
 
 
 _HEADER_MARKERS = (
@@ -591,6 +594,14 @@ def _decode_document_content(
             # únicamente contexto semántico inicial, sin modificar ni
             # eliminar el contenido original ni su evidencia.
             document_knowledge = DocumentSemanticAnalyzer().analyze(
+                document_knowledge,
+            )
+
+            # La resolución de entidades se ejecuta después de disponer
+            # del contexto semántico y antes de proyectar el documento a
+            # las capas canónicas. El resolver solo consume la evidencia
+            # ya extraída y no vuelve a leer el PDF.
+            document_knowledge = DocumentEntityResolver().resolve(
                 document_knowledge,
             )
 
