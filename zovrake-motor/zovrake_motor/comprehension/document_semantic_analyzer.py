@@ -349,9 +349,13 @@ class DocumentSemanticAnalyzer:
                     )
                 )
             else:
+                # ``unknown`` no significa ausencia de evidencia. Cuando
+                # ``_classify_region`` detecta una ambigüedad, debe conservar
+                # su confianza y sus señales para que las capas superiores
+                # conozcan exactamente por qué la región no fue resuelta.
                 section = "unknown"
-                confidence = 0.0
-                hints = ()
+                confidence = direct_confidence
+                hints = direct_hints
 
             metadata = dict(region.metadata)
 
@@ -451,6 +455,44 @@ class DocumentSemanticAnalyzer:
         combined = (
             f"{text} {metadata_text}"
         ).strip()
+
+        # Encabezados explícitos e incompatibles dentro de la misma región
+        # son una ambigüedad estructural. Se resuelve antes de cualquier
+        # scoring secundario para impedir que el orden de las reglas haga
+        # ganar arbitrariamente a uno de los roles.
+        explicit_heading_hits: dict[str, tuple[str, ...]] = {}
+
+        for section, phrases in self._EXPLICIT_SECTION_RULES:
+            matched_phrases = tuple(
+                phrase
+                for phrase in phrases
+                if self._normalize(phrase) in combined
+            )
+
+            if matched_phrases:
+                explicit_heading_hits[section] = matched_phrases
+
+        explicit_heading_sections = tuple(
+            explicit_heading_hits.keys()
+        )
+
+        if len(explicit_heading_sections) > 1:
+            competing_hints = tuple(
+                hint
+                for section in explicit_heading_sections
+                for phrase in explicit_heading_hits[section]
+                for hint in (f"{section}:{phrase}",)
+            )
+
+            return (
+                "unknown",
+                0.49,
+                tuple(
+                    dict.fromkeys(
+                        (*competing_hints, "ambiguous_semantic_context")
+                    )
+                ),
+            )
 
         explicit_scores: dict[str, float] = {}
         hints_by_section: dict[str, list[str]] = {}
@@ -617,63 +659,6 @@ class DocumentSemanticAnalyzer:
         )
 
         best_section, best_score = ranked[0]
-
-        # Si dos encabezados/señales fuertes de sección compiten dentro
-        # de la misma región, no debemos elegir arbitrariamente uno.
-        # Esto es especialmente importante para texto que contiene dos
-        # encabezados incompatibles, por ejemplo:
-        # "DATOS DEL CLIENTE DATOS DEL PROVEEDOR".
-        explicit_sections = [
-            section
-            for section, score in explicit_scores.items()
-            if score >= 0.65
-        ]
-
-        if len(explicit_sections) > 1:
-            strongest = sorted(
-                explicit_sections,
-                key=lambda section: explicit_scores[section],
-                reverse=True,
-            )
-
-            strongest_scores = [
-                explicit_scores[section]
-                for section in strongest[:2]
-            ]
-
-            if (
-                len(strongest_scores) == 2
-                and min(strongest_scores) >= 0.65
-                and not table_roles
-            ):
-                competing_hints: list[str] = []
-
-                for section in strongest[:2]:
-                    competing_hints.extend(
-                        hints_by_section.get(
-                            section,
-                            [],
-                        )
-                    )
-
-                competing_hints.append(
-                    "ambiguous_semantic_context"
-                )
-
-                return (
-                    "unknown",
-                    round(
-                        min(
-                            strongest_scores
-                        ),
-                        4,
-                    ),
-                    tuple(
-                        dict.fromkeys(
-                            competing_hints
-                        )
-                    ),
-                )
 
         # Si dos interpretaciones fuertes compiten por contenido, devolvemos
         # unknown en vez de fingir una certeza inexistente.
