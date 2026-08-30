@@ -14,32 +14,37 @@ from zovrake_motor.comprehension.models import (
 
 class DocumentFactExtractor:
     """
-    Extrae hechos y atributos observables sin asumir un tipo documental fijo.
+    Extrae hechos observables desde DocumentKnowledge sin reducir el contenido.
 
-    Esta capa trabaja sobre el contenido ya conservado en DocumentKnowledge.
-    No elimina regiones, no modifica el texto original y no convierte una
-    hipótesis en una verdad si la evidencia no es suficiente.
+    La extracción es deliberadamente conservadora. Una coincidencia textual
+    no se convierte automáticamente en un hecho fuerte: cada hecho conserva
+    su origen, región, página, evidencia y confianza.
 
-    Detecta patrones generales:
+    Soporta:
     - pares etiqueta: valor;
-    - números con unidades;
+    - campos key=value procedentes de tablas;
+    - identificadores;
     - importes monetarios;
     - porcentajes;
     - fechas;
     - correos;
-    - teléfonos;
     - URLs;
-    - identificadores etiquetados;
-    - valores asociados a encabezados semánticos.
+    - mediciones con unidad.
 
-    Los hechos resultantes conservan región, página, evidencia y confianza.
+    No depende de un tipo de documento concreto.
     """
 
-    MODEL_VERSION = "1.0-deterministic-fact-extraction"
+    MODEL_VERSION = "1.1-deterministic-fact-extraction"
 
     _LABEL_VALUE = re.compile(
-        r"^\s*(?P<label>[A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9][^:\n]{1,100}?)"
+        r"^\s*(?P<label>[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]"
+        r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9 _./()]{1,79}?)"
         r"\s*[:\-]\s*(?P<value>.+?)\s*$"
+    )
+
+    _KEY_VALUE = re.compile(
+        r"(?P<label>[A-Za-zÁÉÍÓÚÜÑáéíóúüñ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9 _./()]{0,79}?)"
+        r"\s*=\s*(?P<value>[^|]+)"
     )
 
     _MONEY = re.compile(
@@ -79,11 +84,6 @@ class DocumentFactExtractor:
     _URL = re.compile(
         r"\b(?:https?://|www\.)[^\s<>\"]+",
         re.IGNORECASE,
-    )
-
-    _PHONE = re.compile(
-        r"(?<!\d)(?:\+\d{1,3}[\s.-]?)?"
-        r"(?:\d[\s.-]?){7,14}\d(?!\d)"
     )
 
     _IDENTIFIER = re.compile(
@@ -145,17 +145,38 @@ class DocumentFactExtractor:
         "cci": "bank_account_cci",
         "swift": "bank_account_swift",
         "iban": "bank_account_iban",
+        "codigo": "code",
+        "código": "code",
+        "sku": "sku",
+        "serie": "serial_number",
+        "ruc": "tax_id",
+        "dni": "identity_document",
+    }
+
+    _WEAK_LABELS = {
+        "sub",
+        "sub.",
+        "fo",
+        "son",
+        "n",
+        "no",
+        "item",
+        "ítem",
+    }
+
+    _NON_VALUE_TOKENS = {
+        "",
+        "-",
+        "—",
+        ":",
+        "|",
     }
 
     def extract(
         self,
         knowledge: DocumentKnowledge,
     ) -> DocumentKnowledge:
-        """
-        Extrae hechos y atributos y devuelve una nueva representación.
-
-        Toda la información existente permanece intacta.
-        """
+        """Extrae hechos/atributos y devuelve una nueva representación."""
         if not isinstance(
             knowledge,
             DocumentKnowledge,
@@ -175,7 +196,10 @@ class DocumentFactExtractor:
             facts.extend(region_facts)
 
             for fact in region_facts:
-                if fact["fact_type"] == "labeled_value":
+                if fact["fact_type"] in {
+                    "labeled_value",
+                    "table_field",
+                }:
                     attributes.append(
                         {
                             "attribute_id": fact["fact_id"],
@@ -195,7 +219,6 @@ class DocumentFactExtractor:
         facts = self._deduplicate(
             facts
         )
-
         attributes = self._deduplicate(
             attributes
         )
@@ -210,8 +233,7 @@ class DocumentFactExtractor:
                     "type": "fact_extraction_empty",
                     "message": (
                         "No se encontraron hechos estructurables "
-                        "con suficiente evidencia en las regiones "
-                        "procesadas."
+                        "con suficiente evidencia en las regiones procesadas."
                     ),
                 }
             )
@@ -222,9 +244,7 @@ class DocumentFactExtractor:
 
         metadata.update(
             {
-                "fact_extraction_model_version": (
-                    self.MODEL_VERSION
-                ),
+                "fact_extraction_model_version": self.MODEL_VERSION,
                 "fact_extraction_stage": (
                     "observable_fact_detection"
                 ),
@@ -245,10 +265,7 @@ class DocumentFactExtractor:
         self,
         region: Any,
     ) -> list[dict[str, Any]]:
-        content = (
-            region.content
-            or ""
-        )
+        content = region.content or ""
 
         if not content.strip():
             return []
@@ -264,42 +281,85 @@ class DocumentFactExtractor:
             if not clean_line:
                 continue
 
-            labeled_match = self._LABEL_VALUE.match(
+            # -----------------------------------------------------
+            # 1. Campos key=value típicos de tablas semánticas.
+            # -----------------------------------------------------
+            for match in self._KEY_VALUE.finditer(
                 clean_line
-            )
-
-            if labeled_match:
+            ):
                 label = self._clean_text(
-                    labeled_match.group(
-                        "label"
-                    )
+                    match.group("label")
                 )
-
                 raw_value = self._clean_text(
-                    labeled_match.group(
-                        "value"
+                    match.group("value")
+                )
+
+                if not self._is_valid_labeled_pair(
+                    label,
+                    raw_value,
+                    table_field=True,
+                ):
+                    continue
+
+                results.append(
+                    self._fact(
+                        region=region,
+                        fact_type="table_field",
+                        raw_value=raw_value,
+                        label=label,
+                        line_index=line_index,
+                        confidence=self._table_field_confidence(
+                            label,
+                            raw_value,
+                        ),
                     )
                 )
 
-                if (
-                    label
-                    and raw_value
-                    and len(label) <= 100
-                ):
-                    results.append(
-                        self._fact(
-                            region=region,
-                            fact_type="labeled_value",
-                            raw_value=raw_value,
-                            label=label,
-                            line_index=line_index,
-                            confidence=self._label_confidence(
-                                label,
-                                raw_value,
-                            ),
+            # -----------------------------------------------------
+            # 2. Pares normales etiqueta: valor.
+            #
+            # No intentamos interpretar líneas que son claramente
+            # representaciones serializadas de una tabla.
+            # -----------------------------------------------------
+            if "=" not in clean_line and "|" not in clean_line:
+                labeled_match = self._LABEL_VALUE.match(
+                    clean_line
+                )
+
+                if labeled_match:
+                    label = self._clean_text(
+                        labeled_match.group(
+                            "label"
+                        )
+                    )
+                    raw_value = self._clean_text(
+                        labeled_match.group(
+                            "value"
                         )
                     )
 
+                    if self._is_valid_labeled_pair(
+                        label,
+                        raw_value,
+                        table_field=False,
+                    ):
+                        results.append(
+                            self._fact(
+                                region=region,
+                                fact_type="labeled_value",
+                                raw_value=raw_value,
+                                label=label,
+                                line_index=line_index,
+                                confidence=self._label_confidence(
+                                    label,
+                                    raw_value,
+                                ),
+                            )
+                        )
+
+            # -----------------------------------------------------
+            # 3. Identificadores.
+            # -----------------------------------------------------
             for match in self._IDENTIFIER.finditer(
                 clean_line
             ):
@@ -322,10 +382,13 @@ class DocumentFactExtractor:
                         raw_value=raw_value,
                         label=label,
                         line_index=line_index,
-                        confidence=0.92,
+                        confidence=0.96,
                     )
                 )
 
+            # -----------------------------------------------------
+            # 4. Moneda/importes.
+            # -----------------------------------------------------
             for match in self._MONEY.finditer(
                 clean_line
             ):
@@ -352,9 +415,16 @@ class DocumentFactExtractor:
                         prefix
                     )
 
-                # Evitamos producir hechos monetarios para números que
-                # no tienen ningún indicador monetario.
                 if not currency:
+                    continue
+
+                normalized_number = (
+                    self._normalize_number(
+                        value
+                    )
+                )
+
+                if normalized_number is None:
                     continue
 
                 results.append(
@@ -364,19 +434,29 @@ class DocumentFactExtractor:
                         raw_value=match.group(0).strip(),
                         label="monetary_value",
                         line_index=line_index,
-                        confidence=0.88,
+                        confidence=0.92,
                         normalized_value={
-                            "value": self._normalize_number(
-                                value
-                            ),
+                            "value": normalized_number,
                             "currency": currency,
                         },
                     )
                 )
 
+            # -----------------------------------------------------
+            # 5. Porcentajes.
+            # -----------------------------------------------------
             for match in self._PERCENT.finditer(
                 clean_line
             ):
+                normalized = self._normalize_number(
+                    match.group(
+                        "value"
+                    )
+                )
+
+                if normalized is None:
+                    continue
+
                 results.append(
                     self._fact(
                         region=region,
@@ -384,17 +464,14 @@ class DocumentFactExtractor:
                         raw_value=match.group(0),
                         label="percentage",
                         line_index=line_index,
-                        confidence=0.94,
-                        normalized_value=(
-                            self._normalize_number(
-                                match.group(
-                                    "value"
-                                )
-                            )
-                        ),
+                        confidence=0.96,
+                        normalized_value=normalized,
                     )
                 )
 
+            # -----------------------------------------------------
+            # 6. Fechas.
+            # -----------------------------------------------------
             for match in self._DATE.finditer(
                 clean_line
             ):
@@ -405,10 +482,13 @@ class DocumentFactExtractor:
                         raw_value=match.group(0),
                         label="date",
                         line_index=line_index,
-                        confidence=0.90,
+                        confidence=0.92,
                     )
                 )
 
+            # -----------------------------------------------------
+            # 7. Correos.
+            # -----------------------------------------------------
             for match in self._EMAIL.finditer(
                 clean_line
             ):
@@ -419,10 +499,13 @@ class DocumentFactExtractor:
                         raw_value=match.group(0),
                         label="email",
                         line_index=line_index,
-                        confidence=0.97,
+                        confidence=0.98,
                     )
                 )
 
+            # -----------------------------------------------------
+            # 8. URLs.
+            # -----------------------------------------------------
             for match in self._URL.finditer(
                 clean_line
             ):
@@ -433,16 +516,24 @@ class DocumentFactExtractor:
                         raw_value=match.group(0),
                         label="url",
                         line_index=line_index,
-                        confidence=0.96,
+                        confidence=0.98,
                     )
                 )
 
+            # -----------------------------------------------------
+            # 9. Mediciones.
+            # -----------------------------------------------------
             for match in self._UNIT_VALUE.finditer(
                 clean_line
             ):
-                value = match.group(
-                    "value"
+                value = self._normalize_number(
+                    match.group(
+                        "value"
+                    )
                 )
+
+                if value is None:
+                    continue
 
                 unit = self._clean_text(
                     match.group(
@@ -457,17 +548,117 @@ class DocumentFactExtractor:
                         raw_value=match.group(0),
                         label="measurement",
                         line_index=line_index,
-                        confidence=0.82,
+                        confidence=0.86,
                         normalized_value={
-                            "value": self._normalize_number(
-                                value
-                            ),
+                            "value": value,
                             "unit": unit,
                         },
                     )
                 )
 
         return results
+
+    def _is_valid_labeled_pair(
+        self,
+        label: str,
+        value: str,
+        *,
+        table_field: bool,
+    ) -> bool:
+        label = label.strip()
+        value = value.strip()
+
+        if (
+            not label
+            or not value
+            or label.casefold()
+            in self._NON_VALUE_TOKENS
+            or value.casefold()
+            in self._NON_VALUE_TOKENS
+        ):
+            return False
+
+        normalized_label = self._normalize_label(
+            label
+        )
+
+        if (
+            normalized_label
+            in self._WEAK_LABELS
+        ):
+            return False
+
+        # En una tabla, la etiqueta debe parecer un nombre de campo.
+        # Esto evita convertir "191: 0452510..." o fragmentos de layout
+        # en atributos documentales arbitrarios.
+        if table_field:
+            if not (
+                normalized_label
+                in self._LABEL_ALIASES
+                or len(normalized_label) >= 3
+            ):
+                return False
+
+            if any(
+                token in normalized_label
+                for token in (
+                    "=",
+                    "|",
+                )
+            ):
+                return False
+
+        # Las etiquetas extremadamente numéricas suelen ser residuos
+        # de una reconstrucción de layout, no campos semánticos.
+        if (
+            sum(
+                char.isdigit()
+                for char in label
+            )
+            > sum(
+                char.isalpha()
+                for char in label
+            )
+        ):
+            return False
+
+        return len(label) <= 100
+
+    @classmethod
+    def _table_field_confidence(
+        cls,
+        label: str,
+        value: str,
+    ) -> float:
+        normalized = cls._normalize_label(
+            label
+        )
+
+        if normalized in cls._LABEL_ALIASES:
+            return 0.96
+
+        if len(value) >= 2:
+            return 0.84
+
+        return 0.62
+
+    @classmethod
+    def _label_confidence(
+        cls,
+        label: str,
+        value: str,
+    ) -> float:
+        normalized = cls._normalize_label(
+            label
+        )
+
+        if normalized in cls._LABEL_ALIASES:
+            return 0.96
+
+        if len(label) >= 4 and len(value) >= 2:
+            return 0.82
+
+        return 0.64
 
     def _fact(
         self,
@@ -498,9 +689,7 @@ class DocumentFactExtractor:
         fact_id = (
             "fact-"
             + sha256(
-                fact_key.encode(
-                    "utf-8"
-                )
+                fact_key.encode("utf-8")
             ).hexdigest()[:24]
         )
 
@@ -518,18 +707,18 @@ class DocumentFactExtractor:
                 )
             ),
             "raw_value": raw_value,
-            "normalized_value": normalized_value
-            if normalized_value is not None
-            else self._normalize_text_value(
-                raw_value
+            "normalized_value": (
+                normalized_value
+                if normalized_value is not None
+                else self._normalize_text_value(
+                    raw_value
+                )
             ),
             "page_number": region.page_number,
             "region_id": region.region_id,
-            "evidence_id": (
-                region.metadata.get(
-                    "evidence_id",
-                    f"evidence-{region.region_id}",
-                )
+            "evidence_id": region.metadata.get(
+                "evidence_id",
+                f"evidence-{region.region_id}",
             ),
             "source_kind": region.source_kind,
             "confidence": round(
@@ -543,31 +732,11 @@ class DocumentFactExtractor:
                 4,
             ),
             "line_index": line_index,
-            "semantic_context": (
-                region.metadata.get(
-                    "document_section",
-                    "unknown",
-                )
+            "semantic_context": region.metadata.get(
+                "document_section",
+                "unknown",
             ),
         }
-
-    @classmethod
-    def _label_confidence(
-        cls,
-        label: str,
-        value: str,
-    ) -> float:
-        normalized = cls._normalize_label(
-            label
-        )
-
-        if normalized in cls._LABEL_ALIASES:
-            return 0.94
-
-        if len(value) >= 2:
-            return 0.78
-
-        return 0.55
 
     @staticmethod
     def _normalize_label(
@@ -639,14 +808,10 @@ class DocumentFactExtractor:
                     for part in parts[1:]
                 )
             ):
-                cleaned = "".join(
-                    parts
-                )
+                cleaned = "".join(parts)
 
         try:
-            return float(
-                cleaned
-            )
+            return float(cleaned)
         except ValueError:
             return None
 
@@ -726,3 +891,4 @@ class DocumentFactExtractor:
             unique.append(value)
 
         return unique
+
