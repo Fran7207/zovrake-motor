@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any, Iterable
 
+
 from zovrake_motor.comprehension.models import (
     DocumentKnowledge,
     DocumentRegion,
@@ -13,21 +14,31 @@ from zovrake_motor.comprehension.models import (
 
 class DocumentSemanticAnalyzer:
     """
-    Clasifica regiones de un ``DocumentKnowledge`` en contextos documentales.
+    Analizador semántico inicial del conocimiento documental.
 
     Esta capa no utiliza modelos externos de IA y no elimina información.
-    Su función es convertir la representación física ya preservada por
-    ``DocumentKnowledgeBuilder`` en contexto semántico inicial.
 
-    La clasificación es deliberadamente conservadora: una región puede
-    conservar varias señales semánticas en ``semantic_hints`` y recibe un
-    único contexto principal para facilitar el consumo por las siguientes
-    capas.
+    Su responsabilidad es:
+    - identificar encabezados/secciones;
+    - utilizar la semántica de tablas ya descubierta;
+    - evitar falsos positivos por palabras genéricas;
+    - propagar contexto de sección a regiones posteriores de la misma página;
+    - conservar el contenido físico original;
+    - registrar las señales que justifican una clasificación.
+
+    Esta clase NO intenta resolver todavía entidades, relaciones ni hechos
+    complejos. Es una capa de contexto previa a esas operaciones.
     """
 
-    MODEL_VERSION = "1.0-deterministic-semantic"
+    MODEL_VERSION = "1.1-context-aware-semantic"
 
-    _SECTION_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    # Frases fuertes que por sí solas pueden identificar una sección.
+    # No usamos términos débiles como "unidad", "producto" o "total"
+    # como identificadores de sección aislados.
+    _EXPLICIT_SECTION_RULES: tuple[
+        tuple[str, tuple[str, ...]],
+        ...,
+    ] = (
         (
             "provider_identity",
             (
@@ -37,6 +48,8 @@ class DocumentSemanticAnalyzer:
                 "datos del emisor",
                 "informacion del emisor",
                 "información del emisor",
+                "informacion de la empresa proveedora",
+                "información de la empresa proveedora",
                 "razon social del proveedor",
                 "razón social del proveedor",
             ),
@@ -50,6 +63,9 @@ class DocumentSemanticAnalyzer:
                 "datos del comprador",
                 "informacion del comprador",
                 "información del comprador",
+                "datos del destinatario",
+                "informacion del destinatario",
+                "información del destinatario",
                 "razon social del cliente",
                 "razón social del cliente",
             ),
@@ -62,10 +78,12 @@ class DocumentSemanticAnalyzer:
                 "información bancaria",
                 "cuenta bancaria",
                 "cuenta corriente",
+                "cuentas bancarias",
                 "cci",
                 "swift",
                 "iban",
-                "banco:",
+                "datos de la cuenta",
+                "cuentas recaudadoras",
             ),
         ),
         (
@@ -75,29 +93,35 @@ class DocumentSemanticAnalyzer:
                 "condiciones de pago",
                 "forma de pago",
                 "plazo de pago",
+                "condiciones de venta",
+                "condiciones de entrega",
                 "tiempo de entrega",
                 "plazo de entrega",
                 "validez de la oferta",
-                "validez de la cotizacion",
                 "validez de la cotización",
+                "validez de la cotizacion",
                 "garantia",
                 "garantía",
-                "vigencia",
+                "vigencia de la oferta",
+                "vigencia de la cotización",
             ),
         ),
         (
             "financial",
             (
+                "resumen financiero",
+                "resumen de costos",
+                "resumen de costes",
                 "subtotal",
                 "igv",
                 "iva",
-                "impuesto",
-                "total",
-                "moneda",
+                "impuestos",
                 "tipo de cambio",
                 "descuento",
                 "precio total",
+                "importe total",
                 "monto total",
+                "total a pagar",
             ),
         ),
         (
@@ -109,42 +133,118 @@ class DocumentSemanticAnalyzer:
                 "ficha técnica",
                 "caracteristicas tecnicas",
                 "características técnicas",
-                "material",
+                "especificaciones del producto",
+                "datos tecnicos",
+                "datos técnicos",
                 "norma tecnica",
                 "norma técnica",
-                "modelo",
-                "marca",
+                "requisitos tecnicos",
+                "requisitos técnicos",
             ),
         ),
         (
             "commercial_items",
             (
-                "descripcion",
-                "descripción",
-                "cantidad",
-                "unidad",
-                "precio unitario",
-                "importe",
-                "producto",
-                "servicio",
-                "codigo",
-                "código",
-                "item",
+                "detalle de productos",
+                "detalle de servicios",
+                "detalle de productos y servicios",
+                "lista de productos",
+                "lista de servicios",
+                "detalle de cotizacion",
+                "detalle de cotización",
+                "detalle de la cotizacion",
+                "detalle de la cotización",
             ),
         ),
         (
             "observation",
             (
                 "observaciones",
-                "observacion",
+                "observaciones generales",
                 "observación",
-                "nota:",
-                "notas:",
+                "observacion",
+                "notas",
+                "nota",
                 "comentarios",
                 "consideraciones",
-                "importante:",
             ),
         ),
+    )
+
+    # Señales de contenido que se evalúan solamente en combinación.
+    _FINANCIAL_VALUE_RULES: tuple[str, ...] = (
+        "subtotal",
+        "igv",
+        "iva",
+        "impuesto",
+        "descuento",
+        "total a pagar",
+        "importe total",
+        "monto total",
+        "tipo de cambio",
+    )
+
+    _COMMERCIAL_STRUCTURE_RULES: tuple[str, ...] = (
+        "descripcion",
+        "descripción",
+        "cantidad",
+        "precio unitario",
+        "importe",
+        "codigo",
+        "código",
+        "producto",
+        "servicio",
+        "unidad",
+    )
+
+    _BANKING_VALUE_RULES: tuple[str, ...] = (
+        "banco",
+        "cuenta",
+        "cuenta corriente",
+        "cuenta bancaria",
+        "cci",
+        "swift",
+        "iban",
+        "recaudadora",
+        "soles",
+        "dolares",
+        "dólares",
+    )
+
+    _CONDITION_VALUE_RULES: tuple[str, ...] = (
+        "validez",
+        "vigencia",
+        "plazo",
+        "entrega",
+        "forma de pago",
+        "condiciones de pago",
+        "garantia",
+        "garantía",
+    )
+
+    _IDENTITY_VALUE_RULES: tuple[str, ...] = (
+        "ruc",
+        "razon social",
+        "razón social",
+        "direccion",
+        "dirección",
+        "telefono",
+        "teléfono",
+        "correo",
+        "email",
+    )
+
+    _TECHNICAL_VALUE_RULES: tuple[str, ...] = (
+        "especificacion",
+        "especificación",
+        "modelo",
+        "marca",
+        "material",
+        "norma",
+        "capacidad",
+        "dimensiones",
+        "caracteristica",
+        "característica",
     )
 
     _TABLE_ROLE_MAP: dict[str, str] = {
@@ -164,17 +264,19 @@ class DocumentSemanticAnalyzer:
         "customer_identity": "customer_identity",
         "observation": "observation",
         "observations": "observation",
+        "identity": "customer_identity",
     }
+
+    _PAGE_CONTEXT_MAX_GAP = 4
 
     def analyze(
         self,
         knowledge: DocumentKnowledge,
     ) -> DocumentKnowledge:
         """
-        Devuelve una nueva representación con contexto semántico inicial.
+        Analiza todas las regiones sin eliminarlas ni modificar su contenido.
 
-        No modifica el objeto recibido y no elimina regiones, tablas,
-        imágenes, OCR ni evidencias.
+        El contexto se resuelve en orden documental dentro de cada página.
         """
         if not isinstance(
             knowledge,
@@ -187,10 +289,69 @@ class DocumentSemanticAnalyzer:
         sections: list[dict[str, Any]] = []
         analyzed_regions: list[DocumentRegion] = []
 
-        for region in knowledge.regions:
-            section, confidence, hints = (
-                self._classify_region(region)
+        current_page: int | None = None
+        current_context = "unknown"
+        current_context_confidence = 0.0
+        current_context_hints: tuple[str, ...] = ()
+        context_region_index = -10_000
+
+        for index, region in enumerate(
+            knowledge.regions,
+        ):
+            if current_page != region.page_number:
+                current_page = region.page_number
+                current_context = "unknown"
+                current_context_confidence = 0.0
+                current_context_hints = ()
+                context_region_index = -10_000
+
+            (
+                direct_section,
+                direct_confidence,
+                direct_hints,
+            ) = self._classify_region(
+                region
             )
+
+            if direct_section != "unknown":
+                section = direct_section
+                confidence = direct_confidence
+                hints = direct_hints
+
+                # Un encabezado/señal explícita actualiza el contexto de la
+                # página para regiones posteriores.
+                if self._is_context_anchor(
+                    region,
+                    section,
+                    direct_hints,
+                ):
+                    current_context = section
+                    current_context_confidence = confidence
+                    current_context_hints = direct_hints
+                    context_region_index = index
+            elif (
+                current_context != "unknown"
+                and index - context_region_index
+                <= self._PAGE_CONTEXT_MAX_GAP
+                and self._can_inherit_context(region)
+            ):
+                section = current_context
+                confidence = round(
+                    current_context_confidence * 0.88,
+                    4,
+                )
+                hints = tuple(
+                    dict.fromkeys(
+                        (
+                            "context:inherited",
+                            *current_context_hints,
+                        )
+                    )
+                )
+            else:
+                section = "unknown"
+                confidence = 0.0
+                hints = ()
 
             metadata = dict(region.metadata)
 
@@ -203,24 +364,28 @@ class DocumentSemanticAnalyzer:
                 }
             )
 
+            analyzed_region = replace(
+                region,
+                metadata=metadata,
+            )
+
             analyzed_regions.append(
-                replace(
-                    region,
-                    metadata=metadata,
-                )
+                analyzed_region
             )
 
             if section != "unknown":
                 sections.append(
                     self._section_record(
-                        region,
+                        analyzed_region,
                         section=section,
                         confidence=confidence,
                         hints=hints,
                     )
                 )
 
-        metadata = dict(knowledge.metadata)
+        metadata = dict(
+            knowledge.metadata
+        )
 
         metadata.update(
             {
@@ -232,24 +397,44 @@ class DocumentSemanticAnalyzer:
                 "semantic_sections_detected": (
                     len(sections)
                 ),
+                "semantic_unknown_regions": (
+                    sum(
+                        1
+                        for region in analyzed_regions
+                        if region.metadata.get(
+                            "document_section"
+                        )
+                        == "unknown"
+                    )
+                ),
             }
         )
 
         return replace(
             knowledge,
-            regions=tuple(analyzed_regions),
-            sections=tuple(sections),
+            regions=tuple(
+                analyzed_regions
+            ),
+            sections=tuple(
+                sections
+            ),
             metadata=metadata,
         )
 
     def _classify_region(
         self,
         region: DocumentRegion,
-    ) -> tuple[str, float, tuple[str, ...]]:
+    ) -> tuple[
+        str,
+        float,
+        tuple[str, ...],
+    ]:
         """
-        Clasifica una región utilizando el contenido y sus metadatos.
+        Clasifica una región usando señales fuertes y combinaciones.
 
-        No modifica el texto original.
+        Palabras genéricas como ``unidad`` o ``total`` no determinan por sí
+        solas una sección; esto evita los falsos positivos observados en PDFs
+        reales.
         """
         text = self._normalize(
             region.content
@@ -267,31 +452,296 @@ class DocumentSemanticAnalyzer:
             f"{text} {metadata_text}"
         ).strip()
 
-        scores: dict[str, float] = {}
-        hints: list[str] = []
+        explicit_scores: dict[str, float] = {}
+        hints_by_section: dict[str, list[str]] = {}
 
-        for section, keywords in self._SECTION_RULES:
-            matched = [
-                keyword
-                for keyword in keywords
-                if self._normalize(keyword)
-                in combined
+        # ---------------------------------------------------------
+        # 1. Encabezados/secciones explícitos.
+        # ---------------------------------------------------------
+        for section, phrases in (
+            self._EXPLICIT_SECTION_RULES
+        ):
+            matches = [
+                phrase
+                for phrase in phrases
+                if self._normalize(
+                    phrase
+                ) in combined
             ]
 
-            if matched:
-                score = min(
+            if matches:
+                explicit_scores[section] = min(
                     1.0,
-                    0.35 + 0.15 * len(matched),
+                    0.65
+                    + (
+                        0.12
+                        * (
+                            len(matches) - 1
+                        )
+                    ),
                 )
 
-                scores[section] = score
+                hints_by_section[section] = [
+                    f"{section}:{phrase}"
+                    for phrase in matches
+                ]
 
-                hints.extend(
-                    f"{section}:{keyword}"
-                    for keyword in matched
+        # ---------------------------------------------------------
+        # 2. Semántica declarada por la tabla.
+        # ---------------------------------------------------------
+        table_roles = self._extract_table_roles(
+            region
+        )
+
+        for role in table_roles:
+            explicit_scores[role] = max(
+                explicit_scores.get(
+                    role,
+                    0.0,
+                ),
+                0.85,
+            )
+
+            hints_by_section.setdefault(
+                role,
+                [],
+            ).append(
+                f"table_role:{role}"
+            )
+
+        # ---------------------------------------------------------
+        # 3. Señales combinadas para regiones de contenido.
+        # ---------------------------------------------------------
+        self._add_combined_signal(
+            text=combined,
+            section="financial",
+            markers=self._FINANCIAL_VALUE_RULES,
+            target_scores=explicit_scores,
+            target_hints=hints_by_section,
+            minimum_matches=2,
+            score=0.72,
+        )
+
+        self._add_combined_signal(
+            text=combined,
+            section="banking",
+            markers=self._BANKING_VALUE_RULES,
+            target_scores=explicit_scores,
+            target_hints=hints_by_section,
+            minimum_matches=2,
+            score=0.74,
+        )
+
+        self._add_combined_signal(
+            text=combined,
+            section="conditions",
+            markers=self._CONDITION_VALUE_RULES,
+            target_scores=explicit_scores,
+            target_hints=hints_by_section,
+            minimum_matches=2,
+            score=0.70,
+        )
+
+        self._add_combined_signal(
+            text=combined,
+            section="provider_identity",
+            markers=self._IDENTITY_VALUE_RULES,
+            target_scores=explicit_scores,
+            target_hints=hints_by_section,
+            minimum_matches=2,
+            score=0.68,
+        )
+
+        self._add_combined_signal(
+            text=combined,
+            section="technical",
+            markers=self._TECHNICAL_VALUE_RULES,
+            target_scores=explicit_scores,
+            target_hints=hints_by_section,
+            minimum_matches=2,
+            score=0.68,
+        )
+
+        # ---------------------------------------------------------
+        # 4. Estructura comercial.
+        #
+        # Solo aceptamos una clasificación comercial por contenido si:
+        # - hay al menos 2 señales estructurales;
+        # - la región es tabla/semantic_table; o
+        # - existe un encabezado explícito de detalle.
+        #
+        # No se clasifica un bloque de texto solo porque mencione "unidad".
+        # ---------------------------------------------------------
+        commercial_matches = [
+            marker
+            for marker in self._COMMERCIAL_STRUCTURE_RULES
+            if self._normalize(marker)
+            in combined
+        ]
+
+        if (
+            len(commercial_matches) >= 2
+            and region.region_type
+            in {
+                "table",
+                "semantic_table",
+            }
+        ):
+            explicit_scores["commercial_items"] = max(
+                explicit_scores.get(
+                    "commercial_items",
+                    0.0,
+                ),
+                0.70,
+            )
+
+            hints_by_section.setdefault(
+                "commercial_items",
+                [],
+            ).extend(
+                f"commercial_structure:{marker}"
+                for marker in commercial_matches
+            )
+
+        if not explicit_scores:
+            return (
+                "unknown",
+                0.0,
+                (),
+            )
+
+        ranked = sorted(
+            explicit_scores.items(),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+
+        best_section, best_score = ranked[0]
+
+        # Si dos encabezados/señales fuertes de sección compiten dentro
+        # de la misma región, no debemos elegir arbitrariamente uno.
+        # Esto es especialmente importante para texto que contiene dos
+        # encabezados incompatibles, por ejemplo:
+        # "DATOS DEL CLIENTE DATOS DEL PROVEEDOR".
+        explicit_sections = [
+            section
+            for section, score in explicit_scores.items()
+            if score >= 0.65
+        ]
+
+        if len(explicit_sections) > 1:
+            strongest = sorted(
+                explicit_sections,
+                key=lambda section: explicit_scores[section],
+                reverse=True,
+            )
+
+            strongest_scores = [
+                explicit_scores[section]
+                for section in strongest[:2]
+            ]
+
+            if (
+                len(strongest_scores) == 2
+                and min(strongest_scores) >= 0.65
+                and not table_roles
+            ):
+                competing_hints: list[str] = []
+
+                for section in strongest[:2]:
+                    competing_hints.extend(
+                        hints_by_section.get(
+                            section,
+                            [],
+                        )
+                    )
+
+                competing_hints.append(
+                    "ambiguous_semantic_context"
                 )
 
-        table_role = self._normalize(
+                return (
+                    "unknown",
+                    round(
+                        min(
+                            strongest_scores
+                        ),
+                        4,
+                    ),
+                    tuple(
+                        dict.fromkeys(
+                            competing_hints
+                        )
+                    ),
+                )
+
+        # Si dos interpretaciones fuertes compiten por contenido, devolvemos
+        # unknown en vez de fingir una certeza inexistente.
+        if len(ranked) > 1:
+            second_section, second_score = ranked[1]
+
+            if (
+                best_score - second_score
+                < 0.08
+                and (
+                    best_score >= 0.60
+                    and second_score >= 0.60
+                )
+            ):
+                hints = tuple(
+                    dict.fromkeys(
+                        (
+                            *hints_by_section.get(
+                                best_section,
+                                [],
+                            ),
+                            *hints_by_section.get(
+                                second_section,
+                                [],
+                            ),
+                            "ambiguous_semantic_context",
+                        )
+                    )
+                )
+
+                return (
+                    "unknown",
+                    round(
+                        min(
+                            best_score,
+                            0.49,
+                        ),
+                        4,
+                    ),
+                    hints,
+                )
+
+        hints = tuple(
+            dict.fromkeys(
+                hints_by_section.get(
+                    best_section,
+                    [],
+                )
+            )
+        )
+
+        return (
+            best_section,
+            round(
+                best_score,
+                4,
+            ),
+            hints,
+        )
+
+    @classmethod
+    def _extract_table_roles(
+        cls,
+        region: DocumentRegion,
+    ) -> tuple[str, ...]:
+        roles: list[str] = []
+
+        table_role = cls._normalize(
             str(
                 region.metadata.get(
                     "table_role",
@@ -300,130 +750,145 @@ class DocumentSemanticAnalyzer:
             )
         )
 
-        mapped_role = self._TABLE_ROLE_MAP.get(
-            table_role
-        )
-
-        if mapped_role:
-            scores[mapped_role] = max(
-                scores.get(
-                    mapped_role,
-                    0.0,
-                ),
-                0.85,
-            )
-
-            hints.append(
-                f"table_role:{table_role}"
-            )
-
-        table_roles = (
-            region.metadata.get(
-                "table_roles",
-                (),
-            )
-            or ()
-        )
-
-        for role in table_roles:
-            mapped = self._TABLE_ROLE_MAP.get(
-                self._normalize(
-                    str(role)
-                )
+        if table_role:
+            mapped = cls._TABLE_ROLE_MAP.get(
+                table_role
             )
 
             if mapped:
-                scores[mapped] = max(
-                    scores.get(
-                        mapped,
-                        0.0,
-                    ),
-                    0.80,
-                )
+                roles.append(mapped)
 
-                hints.append(
-                    f"table_roles:{role}"
-                )
-
-        region_type = self._normalize(
-            region.region_type
+        table_roles = region.metadata.get(
+            "table_roles",
+            (),
         )
 
-        if (
-            region_type == "semantic_table"
-            and not scores
+        if isinstance(
+            table_roles,
+            str,
         ):
-            scores["commercial_items"] = 0.25
-            hints.append(
-                "semantic_table_without_role"
+            values = (
+                role.strip()
+                for role in table_roles.split(",")
+            )
+        elif isinstance(
+            table_roles,
+            (
+                list,
+                tuple,
+                set,
+                frozenset,
+            ),
+        ):
+            values = (
+                str(role)
+                for role in table_roles
+            )
+        else:
+            values = ()
+
+        for role in values:
+            mapped = cls._TABLE_ROLE_MAP.get(
+                cls._normalize(role)
             )
 
-        if (
-            region_type == "table"
-            and not scores
-        ):
-            scores["commercial_items"] = 0.20
-            hints.append(
-                "table_without_role"
-            )
+            if mapped:
+                roles.append(mapped)
 
-        if not scores:
-            return (
-                "unknown",
+        return tuple(
+            dict.fromkeys(roles)
+        )
+
+    @staticmethod
+    def _add_combined_signal(
+        *,
+        text: str,
+        section: str,
+        markers: Iterable[str],
+        target_scores: dict[str, float],
+        target_hints: dict[str, list[str]],
+        minimum_matches: int,
+        score: float,
+    ) -> None:
+        matches = [
+            marker
+            for marker in markers
+            if DocumentSemanticAnalyzer._normalize(
+                marker
+            ) in text
+        ]
+
+        if len(matches) < minimum_matches:
+            return
+
+        target_scores[section] = max(
+            target_scores.get(
+                section,
                 0.0,
-                (),
+            ),
+            score,
+        )
+
+        target_hints.setdefault(
+            section,
+            [],
+        ).extend(
+            f"{section}:{marker}"
+            for marker in matches
+        )
+
+    @staticmethod
+    def _is_context_anchor(
+        region: DocumentRegion,
+        section: str,
+        hints: tuple[str, ...],
+    ) -> bool:
+        """
+        Determina si una región tiene fuerza suficiente para abrir contexto
+        para los bloques posteriores.
+        """
+        if section == "unknown":
+            return False
+
+        if region.region_type in {
+            "table",
+            "semantic_table",
+        }:
+            return any(
+                hint.startswith(
+                    "table_role:"
+                )
+                or hint.startswith(
+                    "table_roles:"
+                )
+                for hint in hints
             )
 
-        ranked = sorted(
-            scores.items(),
-            key=lambda item: item[1],
-            reverse=True,
+        return any(
+            ":" in hint
+            and not hint.startswith(
+                "context:"
+            )
+            for hint in hints
         )
 
-        section, confidence = ranked[0]
+    @staticmethod
+    def _can_inherit_context(
+        region: DocumentRegion,
+    ) -> bool:
+        """
+        Solo permite heredar contexto a regiones que no sean una entidad
+        estructural fuerte incompatible.
 
-        # Si dos contextos están prácticamente empatados,
-        # no fingimos una certeza inexistente.
-        if len(ranked) > 1:
-            second_confidence = ranked[1][1]
+        Las tablas semánticas ya clasificadas siempre se clasifican por su
+        propia información y no dependen del contexto anterior.
+        """
+        if region.region_type in {
+            "semantic_table",
+        }:
+            return False
 
-            if (
-                confidence
-                - second_confidence
-                < 0.08
-            ):
-                hints.append(
-                    "ambiguous_semantic_context"
-                )
-
-                return (
-                    "unknown",
-                    round(
-                        min(
-                            confidence,
-                            0.49,
-                        ),
-                        4,
-                    ),
-                    tuple(
-                        dict.fromkeys(
-                            hints
-                        )
-                    ),
-                )
-
-        return (
-            section,
-            round(
-                confidence,
-                4,
-            ),
-            tuple(
-                dict.fromkeys(
-                    hints
-                )
-            ),
-        )
+        return True
 
     @staticmethod
     def _section_record(
@@ -434,7 +899,7 @@ class DocumentSemanticAnalyzer:
         hints: Iterable[str],
     ) -> dict[str, Any]:
         """
-        Crea un registro de sección con trazabilidad hacia la región.
+        Crea un registro trazable de la sección detectada.
         """
         return {
             "section_id": (
@@ -462,8 +927,9 @@ class DocumentSemanticAnalyzer:
         value: str,
     ) -> str:
         """
-        Normaliza espacios y mayúsculas sin alterar
-        el contenido almacenado.
+        Normaliza únicamente para comparar.
+
+        Nunca modifica el contenido almacenado en DocumentKnowledge.
         """
         return " ".join(
             str(value)
@@ -491,12 +957,10 @@ class DocumentSemanticAnalyzer:
         ):
             for key, item in value.items():
                 yield str(key)
-
                 yield from (
                     DocumentSemanticAnalyzer
                     ._string_values(item)
                 )
-
             return
 
         if isinstance(
@@ -505,6 +969,7 @@ class DocumentSemanticAnalyzer:
                 list,
                 tuple,
                 set,
+                frozenset,
             ),
         ):
             for item in value:
@@ -512,7 +977,6 @@ class DocumentSemanticAnalyzer:
                     DocumentSemanticAnalyzer
                     ._string_values(item)
                 )
-
             return
 
         if value is not None:
