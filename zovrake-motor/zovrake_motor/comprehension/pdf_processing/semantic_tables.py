@@ -174,6 +174,85 @@ class PdfSemanticTableAnalyzer:
     _HEADER_MERGE_Y_TOLERANCE = 8.0
     _MIN_HEADER_MATCHES = 2
 
+    # Vocabulario documental para clasificar la función probable de una
+    # tabla. La clasificación no elimina filas ni datos; solamente añade
+    # contexto semántico para las capas posteriores.
+    _ROLE_TEXT_MARKERS: dict[str, tuple[str, ...]] = {
+        "conditions": (
+            "validez",
+            "plazo de entrega",
+            "tiempo de entrega",
+            "forma de pago",
+            "condiciones",
+            "condiciones comerciales",
+            "garantia",
+            "garantía",
+            "vigencia",
+            "entrega",
+            "pago",
+        ),
+        "banking": (
+            "cuenta",
+            "cta cte",
+            "cta cte.",
+            "banco",
+            "cuenta corriente",
+            "cuenta bancaria",
+            "recaudadora",
+            "recaudadoras",
+            "depositar",
+            "cci",
+            "codigo interbancario",
+            "código interbancario",
+        ),
+        "identity": (
+            "ruc",
+            "razon social",
+            "razón social",
+            "empresa",
+            "direccion",
+            "dirección",
+            "contacto",
+            "telefono",
+            "teléfono",
+            "email",
+            "correo",
+            "representante",
+        ),
+        "technical": (
+            "especificacion",
+            "especificación",
+            "especificaciones",
+            "ficha tecnica",
+            "ficha técnica",
+            "caracteristica",
+            "característica",
+            "marca",
+            "modelo",
+        ),
+        "observation": (
+            "observacion",
+            "observación",
+            "observaciones",
+            "nota",
+            "notas",
+            "comentario",
+            "comentarios",
+        ),
+        "financial": (
+            "subtotal",
+            "descuento",
+            "impuesto",
+            "igv",
+            "iva",
+            "retencion",
+            "retención",
+            "percepcion",
+            "percepción",
+            "moneda",
+        ),
+    }
+
     def analyze(
         self,
         table: PdfTable,
@@ -216,6 +295,15 @@ class PdfSemanticTableAnalyzer:
             rows=semantic_rows,
         )
 
+        (
+            table_role,
+            table_role_confidence,
+            table_role_evidence,
+        ) = self._classify_table_role(
+            columns=columns,
+            rows=semantic_rows,
+        )
+
         return PdfSemanticTable(
             table_id=f"{table.table_id}-semantic",
             columns=tuple(
@@ -238,6 +326,9 @@ class PdfSemanticTableAnalyzer:
                 f"header_row:{header_index}",
                 "source:physical_table",
             ),
+            table_role=table_role,
+            table_role_confidence=table_role_confidence,
+            table_role_evidence=table_role_evidence,
         )
 
     def analyze_page(
@@ -336,6 +427,15 @@ class PdfSemanticTableAnalyzer:
                 matched_header_word_count=header_candidate.header_word_count,
             )
 
+            (
+                table_role,
+                table_role_confidence,
+                table_role_evidence,
+            ) = self._classify_table_role(
+                columns=columns,
+                rows=rows,
+            )
+
             semantic_tables.append(
                 PdfSemanticTable(
                     table_id=(
@@ -364,6 +464,9 @@ class PdfSemanticTableAnalyzer:
                         f"header_line_end:{header_candidate.end_line_index}",
                         f"bbox:{bbox}",
                     ),
+                    table_role=table_role,
+                    table_role_confidence=table_role_confidence,
+                    table_role_evidence=table_role_evidence,
                 )
             )
 
@@ -594,6 +697,263 @@ class PdfSemanticTableAnalyzer:
             (column_confidence * 0.75)
             + (row_confidence * 0.25),
             4,
+        )
+
+    @classmethod
+    def _classify_table_role(
+        cls,
+        *,
+        columns: Sequence[_ColumnCandidate],
+        rows: Sequence[dict[str, Any]],
+    ) -> tuple[str, float, tuple[str, ...]]:
+        """
+        Determina la función documental más probable de una tabla.
+
+        La clasificación combina evidencia estructural y textual. No
+        descarta contenido: solamente añade una hipótesis semántica que
+        las capas posteriores pueden utilizar.
+
+        La salida es conservadora. Cuando dos roles compiten con fuerza
+        similar, se devuelve ``unknown`` en lugar de fingir una certeza
+        inexistente.
+        """
+        if not columns and not rows:
+            return (
+                "unknown",
+                0.0,
+                ("reason:empty_table",),
+            )
+
+        column_keys = {
+            column.key
+            for column in columns
+            if column.key
+        }
+
+        role_scores: dict[str, float] = {
+            "commercial_items": 0.0,
+            "conditions": 0.0,
+            "financial": 0.0,
+            "banking": 0.0,
+            "identity": 0.0,
+            "technical": 0.0,
+            "observation": 0.0,
+            "administrative": 0.0,
+            "unknown": 0.0,
+        }
+
+        role_evidence: dict[str, list[str]] = {
+            role: []
+            for role in role_scores
+        }
+
+        # --------------------------------------------------------------
+        # Evidencia estructural comercial.
+        # --------------------------------------------------------------
+        structural_weights = {
+            "description": 3.0,
+            "quantity": 2.0,
+            "unit": 1.5,
+            "unit_price": 2.5,
+            "total": 2.0,
+            "code": 1.0,
+            "brand": 0.75,
+            "model": 0.75,
+        }
+
+        for key, weight in structural_weights.items():
+            if key in column_keys:
+                role_scores["commercial_items"] += weight
+                role_evidence["commercial_items"].append(
+                    f"column:{key}"
+                )
+
+        for key, weight in (
+            ("discount", 1.75),
+            ("tax", 1.75),
+            ("currency", 1.25),
+        ):
+            if key in column_keys:
+                role_scores["financial"] += weight
+                role_evidence["financial"].append(
+                    f"column:{key}"
+                )
+
+        # --------------------------------------------------------------
+        # Evidencia textual del contenido real de las filas.
+        # --------------------------------------------------------------
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+
+            row_text = cls._normalize_label(
+                " ".join(
+                    str(value).strip()
+                    for value in row.values()
+                    if value is not None
+                    and str(value).strip()
+                )
+            )
+
+            if not row_text:
+                continue
+
+            for role, markers in cls._ROLE_TEXT_MARKERS.items():
+                for marker in markers:
+                    normalized_marker = cls._normalize_label(marker)
+
+                    if (
+                        normalized_marker
+                        and normalized_marker in row_text
+                    ):
+                        role_scores[role] += 2.0
+                        role_evidence[role].append(
+                            f"text:{normalized_marker}"
+                        )
+
+        # --------------------------------------------------------------
+        # Identidad es información administrativa, salvo que exista una
+        # estructura comercial suficientemente fuerte que la acompañe.
+        # --------------------------------------------------------------
+        if role_scores["identity"] > 0.0:
+            role_scores["administrative"] += (
+                role_scores["identity"] * 0.8
+            )
+            role_evidence["administrative"].append(
+                "identity_information_detected"
+            )
+
+        commercial_core = sum(
+            key in column_keys
+            for key in (
+                "description",
+                "quantity",
+                "unit",
+                "unit_price",
+                "total",
+            )
+        )
+
+        non_item_dominant = (
+            role_scores["conditions"]
+            + role_scores["banking"]
+            + role_scores["identity"]
+            + role_scores["technical"]
+            + role_scores["observation"]
+        )
+
+        if non_item_dominant > 0.0:
+            role_scores["commercial_items"] *= 0.55
+
+        if commercial_core < 2:
+            role_scores["commercial_items"] *= 0.25
+
+        # Si una tabla es claramente bancaria o de condiciones y carece
+        # de núcleo comercial, reforzamos el rol correspondiente.
+        if (
+            role_scores["banking"] >= 3.0
+            and commercial_core < 2
+        ):
+            role_evidence["banking"].append(
+                "banking_structure_dominant"
+            )
+
+        if (
+            role_scores["conditions"] >= 3.0
+            and commercial_core < 2
+        ):
+            role_evidence["conditions"].append(
+                "conditions_structure_dominant"
+            )
+
+        ranked = sorted(
+            (
+                (role, score)
+                for role, score in role_scores.items()
+                if role != "unknown"
+            ),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+
+        if not ranked or ranked[0][1] <= 0.0:
+            return (
+                "unknown",
+                0.0,
+                ("reason:no_role_evidence",),
+            )
+
+        best_role, best_score = ranked[0]
+        second_score = (
+            ranked[1][1]
+            if len(ranked) > 1
+            else 0.0
+        )
+
+        margin = best_score - second_score
+
+        if margin < max(1.0, best_score * 0.10):
+            ambiguous_evidence = tuple(
+                f"candidate:{role}:{score:.3f}"
+                for role, score in ranked[:3]
+                if score > 0.0
+            )
+            return (
+                "unknown",
+                round(
+                    min(
+                        best_score
+                        / max(best_score + second_score, 1.0),
+                        1.0,
+                    ),
+                    4,
+                ),
+                (
+                    "reason:ambiguous_role",
+                    *ambiguous_evidence,
+                ),
+            )
+
+        total_positive = sum(
+            max(score, 0.0)
+            for _, score in ranked
+        )
+
+        dominance = (
+            best_score / total_positive
+            if total_positive > 0.0
+            else 0.0
+        )
+
+        separation = min(
+            margin / max(best_score, 1.0),
+            1.0,
+        )
+
+        confidence = round(
+            min(
+                1.0,
+                (dominance * 0.65)
+                + (separation * 0.35),
+            ),
+            4,
+        )
+
+        evidence = tuple(
+            dict.fromkeys(
+                role_evidence[best_role]
+            )
+        )
+
+        if not evidence:
+            evidence = (
+                f"score:{best_score:.4f}",
+            )
+
+        return (
+            best_role,
+            confidence,
+            evidence,
         )
 
     def _find_layout_headers(

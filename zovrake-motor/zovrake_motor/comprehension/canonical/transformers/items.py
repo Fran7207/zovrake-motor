@@ -282,11 +282,6 @@ class ItemsTransformer(ItemsTransformerPort):
                         for key in column_keys
                     }
 
-                    if not self._is_probable_commercial_item(
-                        fields,
-                    ):
-                        continue
-
                     description = str(
                         fields.get(
                             "description",
@@ -456,11 +451,6 @@ class ItemsTransformer(ItemsTransformerPort):
                         "values": values,
                     }
 
-                    if not self._is_probable_commercial_item(
-                        physical_fields,
-                    ):
-                        continue
-
                     items.append(
                         CanonicalItem(
                             item_id=(
@@ -513,11 +503,6 @@ class ItemsTransformer(ItemsTransformerPort):
                         continue
 
                     metadata_fields = dict(item_data)
-
-                    if not self._is_probable_commercial_item(
-                        metadata_fields,
-                    ):
-                        continue
 
                     items.append(
                         CanonicalItem(

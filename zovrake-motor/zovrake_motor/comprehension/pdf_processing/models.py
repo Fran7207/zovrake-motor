@@ -55,6 +55,9 @@ class PdfSemanticTable:
 
     La estructura se descubre a partir del contenido real del documento.
     No representa una plantilla fija de cotización.
+
+    ``table_role`` describe la función documental más probable de la tabla.
+    No elimina contenido ni determina por sí solo que una fila sea un ítem.
     """
 
     table_id: str
@@ -64,8 +67,31 @@ class PdfSemanticTable:
     source_table_id: str = ""
     source_page_number: int | None = None
     evidence: tuple[str, ...] = ()
+    table_role: str = "unknown"
+    table_role_confidence: float = 0.0
+    table_role_evidence: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
+        return {
+            "table_id": self.table_id,
+            "columns": [
+                column.to_dict()
+                for column in self.columns
+            ],
+            "rows": [
+                dict(row)
+                for row in self.rows
+            ],
+            "confidence": self.confidence,
+            "source_table_id": self.source_table_id,
+            "source_page_number": self.source_page_number,
+            "evidence": list(self.evidence),
+            "table_role": self.table_role,
+            "table_role_confidence": self.table_role_confidence,
+            "table_role_evidence": list(
+                self.table_role_evidence
+            ),
+        }
         return {
             "table_id": self.table_id,
             "columns": [
