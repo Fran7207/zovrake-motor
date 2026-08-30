@@ -17,6 +17,9 @@ from zovrake_motor.comprehension.pdf_processing.processor import (
 from zovrake_motor.comprehension.document_knowledge_builder import (
     DocumentKnowledgeBuilder,
 )
+from zovrake_motor.comprehension.document_semantic_analyzer import (
+    DocumentSemanticAnalyzer,
+)
 
 
 _HEADER_MARKERS = (
@@ -582,6 +585,13 @@ def _decode_document_content(
             # volver a abrir ni volver a extraer el PDF.
             document_knowledge = DocumentKnowledgeBuilder().build(
                 processed,
+            )
+
+            # La representación física ya está unificada. Ahora se añade
+            # únicamente contexto semántico inicial, sin modificar ni
+            # eliminar el contenido original ni su evidencia.
+            document_knowledge = DocumentSemanticAnalyzer().analyze(
+                document_knowledge,
             )
 
             tables = tuple(
