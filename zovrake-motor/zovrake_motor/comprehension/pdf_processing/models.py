@@ -56,8 +56,14 @@ class PdfSemanticTable:
     La estructura se descubre a partir del contenido real del documento.
     No representa una plantilla fija de cotización.
 
-    ``table_role`` describe la función documental más probable de la tabla.
-    No elimina contenido ni determina por sí solo que una fila sea un ítem.
+    ``table_role`` representa el rol documental principal.
+
+    ``table_roles`` conserva todos los roles documentales que cuentan
+    con evidencia suficiente. Esto permite representar tablas mixtas,
+    por ejemplo una tabla que contenga simultáneamente condiciones y
+    datos bancarios.
+
+    La clasificación nunca elimina filas ni datos.
     """
 
     table_id: str
@@ -70,6 +76,7 @@ class PdfSemanticTable:
     table_role: str = "unknown"
     table_role_confidence: float = 0.0
     table_role_evidence: tuple[str, ...] = ()
+    table_roles: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -91,6 +98,7 @@ class PdfSemanticTable:
             "table_role_evidence": list(
                 self.table_role_evidence
             ),
+            "table_roles": list(self.table_roles),
         }
         return {
             "table_id": self.table_id,
