@@ -46,6 +46,173 @@ def _extract_group_technical(structure: StructureView | None) -> tuple[dict[str,
     return fields, specs
 
 
+def _extract_semantic_knowledge(
+    structure: StructureView | None,
+) -> dict[str, Any]:
+    """
+    Conserva el conocimiento semántico que CSE ya preparó para el grupo.
+
+    CMB no vuelve a interpretar el documento: únicamente transporta la
+    procedencia semántica al Modelo Comparativo Definitivo.
+    """
+    if structure is None:
+        return {}
+
+    metadata_prepared = dict(
+        structure.metadata_prepared
+    )
+
+    raw = metadata_prepared.get(
+        "semantic_knowledge",
+        {},
+    )
+
+    if not isinstance(
+        raw,
+        dict,
+    ):
+        return {}
+
+    return {
+        "semantic_knowledge_available": bool(
+            raw.get(
+                "semantic_knowledge_available",
+                False,
+            )
+        ),
+        "semantic_fact_ids": list(
+            raw.get(
+                "semantic_fact_ids",
+                (),
+            )
+            or ()
+        ),
+        "semantic_attribute_ids": list(
+            raw.get(
+                "semantic_attribute_ids",
+                (),
+            )
+            or ()
+        ),
+        "semantic_entity_ids": list(
+            raw.get(
+                "semantic_entity_ids",
+                (),
+            )
+            or ()
+        ),
+        "semantic_evidence_ids": list(
+            raw.get(
+                "semantic_evidence_ids",
+                (),
+            )
+            or ()
+        ),
+        "semantic_facts": list(
+            raw.get(
+                "semantic_facts",
+                (),
+            )
+            or ()
+        ),
+    }
+
+
+def _extract_provider_semantic_knowledge(
+    rows: tuple[dict[str, Any], ...],
+) -> tuple[dict[str, Any], ...]:
+    """
+    Conserva el snapshot semántico específico de cada fila/proveedor.
+
+    DRB ya asoció esta información de forma conservadora; CMB no la
+    recalcula.
+    """
+    result: list[dict[str, Any]] = []
+
+    for row in rows:
+        if not isinstance(
+            row,
+            dict,
+        ):
+            continue
+
+        metadata = row.get(
+            "metadata",
+            {},
+        )
+
+        if not isinstance(
+            metadata,
+            dict,
+        ):
+            continue
+
+        if not (
+            metadata.get(
+                "semantic_knowledge_available",
+                False,
+            )
+            or metadata.get(
+                "semantic_knowledge_matched",
+                False,
+            )
+        ):
+            continue
+
+        result.append(
+            {
+                "provider_id": str(
+                    row.get(
+                        "provider_id",
+                        "",
+                    )
+                ),
+                "semantic_knowledge_available": bool(
+                    metadata.get(
+                        "semantic_knowledge_available",
+                        False,
+                    )
+                ),
+                "semantic_knowledge_matched": bool(
+                    metadata.get(
+                        "semantic_knowledge_matched",
+                        False,
+                    )
+                ),
+                "semantic_entity_ids": list(
+                    metadata.get(
+                        "semantic_entity_ids",
+                        (),
+                    )
+                    or ()
+                ),
+                "semantic_fact_ids": list(
+                    metadata.get(
+                        "semantic_fact_ids",
+                        (),
+                    )
+                    or ()
+                ),
+                "semantic_evidence_ids": list(
+                    metadata.get(
+                        "semantic_evidence_ids",
+                        (),
+                    )
+                    or ()
+                ),
+                "semantic_facts": list(
+                    metadata.get(
+                        "semantic_facts",
+                        (),
+                    )
+                    or ()
+                ),
+            }
+        )
+
+    return tuple(result)
+
+
 def _extract_provider_commercial_fields(providers: tuple[dict[str, Any], ...]) -> tuple[dict[str, Any], ...]:
     result: list[dict[str, Any]] = []
     for provider in providers:
@@ -144,6 +311,16 @@ def build_definitive_model(
     )
 
     integrity_status = "valid" if integrity_valid else "invalid"
+
+    semantic_knowledge = _extract_semantic_knowledge(
+        structure
+    )
+    provider_semantic_knowledge = (
+        _extract_provider_semantic_knowledge(
+            rows
+        )
+    )
+
     metadata = {
         "definitive_model_id": definitive_model_id,
         "enrichment_id": enriched_table.enrichment_id,
@@ -151,6 +328,51 @@ def build_definitive_model(
         "builder_name": builder_name,
         "pm7_input_contract_prepared": PM7_INPUT_CONTRACT_PREPARED,
         "inherited_metadata": dict(enriched_table.metadata),
+        "semantic_knowledge": semantic_knowledge,
+        "semantic_knowledge_available": bool(
+            semantic_knowledge.get(
+                "semantic_knowledge_available",
+                False,
+            )
+        ),
+        "semantic_fact_ids": list(
+            semantic_knowledge.get(
+                "semantic_fact_ids",
+                (),
+            )
+            or ()
+        ),
+        "semantic_attribute_ids": list(
+            semantic_knowledge.get(
+                "semantic_attribute_ids",
+                (),
+            )
+            or ()
+        ),
+        "semantic_entity_ids": list(
+            semantic_knowledge.get(
+                "semantic_entity_ids",
+                (),
+            )
+            or ()
+        ),
+        "semantic_evidence_ids": list(
+            semantic_knowledge.get(
+                "semantic_evidence_ids",
+                (),
+            )
+            or ()
+        ),
+        "semantic_facts": list(
+            semantic_knowledge.get(
+                "semantic_facts",
+                (),
+            )
+            or ()
+        ),
+        "provider_semantic_knowledge": list(
+            provider_semantic_knowledge
+        ),
     }
 
     motor_refs = {
