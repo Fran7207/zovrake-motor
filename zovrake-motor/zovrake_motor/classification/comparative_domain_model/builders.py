@@ -41,6 +41,117 @@ def _resolve_primary_item(group: dict[str, Any]) -> str:
     return group_type
 
 
+def _semantic_group_provenance(
+    group: dict[str, Any],
+) -> dict[str, Any]:
+    """
+    Transporta la procedencia semántica ya consolidada por CGB.
+
+    CDMB no vuelve a leer documentos, no recalcula equivalencias y no
+    reconstruye hechos. Solamente preserva la información que CGB ya
+    entregó dentro de ``group["metadata"]``.
+    """
+    raw_metadata = group.get(
+        "metadata",
+        {},
+    )
+
+    if not isinstance(
+        raw_metadata,
+        dict,
+    ):
+        return {
+            "semantic_knowledge_available": False,
+            "semantic_fact_ids": (),
+            "semantic_attribute_ids": (),
+            "semantic_entity_ids": (),
+            "semantic_evidence_ids": (),
+            "semantic_facts": (),
+        }
+
+    def unique_values(
+        key: str,
+    ) -> tuple[str, ...]:
+        raw_values = raw_metadata.get(
+            key,
+            (),
+        )
+
+        if not isinstance(
+            raw_values,
+            (list, tuple, set, frozenset),
+        ):
+            return ()
+
+        return tuple(
+            dict.fromkeys(
+                str(value).strip()
+                for value in raw_values
+                if str(value).strip()
+            )
+        )
+
+    raw_facts = raw_metadata.get(
+        "semantic_facts",
+        (),
+    )
+
+    facts: list[dict[str, Any]] = []
+
+    if isinstance(
+        raw_facts,
+        (list, tuple),
+    ):
+        for fact in raw_facts:
+            if isinstance(
+                fact,
+                dict,
+            ):
+                facts.append(
+                    dict(fact)
+                )
+
+    unique_facts: dict[str, dict[str, Any]] = {}
+
+    for fact in facts:
+        fact_id = str(
+            fact.get(
+                "fact_id",
+                "",
+            )
+        ).strip()
+
+        if fact_id:
+            unique_facts.setdefault(
+                fact_id,
+                fact,
+            )
+
+    return {
+        "semantic_knowledge_available": bool(
+            raw_metadata.get(
+                "semantic_knowledge_available",
+                False,
+            )
+        ),
+        "semantic_fact_ids": unique_values(
+            "semantic_fact_ids"
+        ),
+        "semantic_attribute_ids": unique_values(
+            "semantic_attribute_ids"
+        ),
+        "semantic_entity_ids": unique_values(
+            "semantic_entity_ids"
+        ),
+        "semantic_evidence_ids": unique_values(
+            "semantic_evidence_ids"
+        ),
+        "semantic_facts": tuple(
+            unique_facts.values()
+        ),
+    }
+
+
 def build_comparative_domain_model_record(
     *,
     catalog_view: ContextAssociationCatalogView,
@@ -55,20 +166,61 @@ def build_comparative_domain_model_record(
     technical_raw = group.get("technical_information", {})
     traceability_raw = group.get("traceability", {})
 
+    semantic = _semantic_group_provenance(
+        group
+    )
+
     return ComparativeDomainModelRecord(
         comparative_model_id=public_model_id,
-        internal_model_id=build_internal_model_id(catalog_view.model_id, internal_sequence),
-        group_id=str(group["group_id"]),
-        group_type=str(group.get("group_type", "material")),
-        primary_item=_resolve_primary_item(group),
-        equivalent_concepts=tuple(group.get("normalized_concept_ids", [])),
-        providers=tuple(group.get("provider_references", [])),
+        internal_model_id=build_internal_model_id(
+            catalog_view.model_id,
+            internal_sequence,
+        ),
+        group_id=str(
+            group["group_id"]
+        ),
+        group_type=str(
+            group.get(
+                "group_type",
+                "material",
+            )
+        ),
+        primary_item=_resolve_primary_item(
+            group
+        ),
+        equivalent_concepts=tuple(
+            group.get(
+                "normalized_concept_ids",
+                [],
+            )
+        ),
+        providers=tuple(
+            group.get(
+                "provider_references",
+                [],
+            )
+        ),
         commercial_information=ComparativeDomainCommercialInformation(
-            fields=dict(commercial_raw.get("fields", {})),
+            fields=dict(
+                commercial_raw.get(
+                    "fields",
+                    {},
+                )
+            ),
         ),
         technical_information=ComparativeDomainTechnicalInformation(
-            specifications=tuple(technical_raw.get("specifications", [])),
-            fields=dict(technical_raw.get("fields", {})),
+            specifications=tuple(
+                technical_raw.get(
+                    "specifications",
+                    [],
+                )
+            ),
+            fields=dict(
+                technical_raw.get(
+                    "fields",
+                    {},
+                )
+            ),
         ),
         related_context=ComparativeDomainContextReference(
             context_id=preserved_context.context_id,
@@ -76,28 +228,75 @@ def build_comparative_domain_model_record(
             association_id=association.association_id,
             codigo_req=preserved_context.codigo_req,
         ),
-        confidence_level_available=settings.default_confidence_level,
+        confidence_level_available=(
+            settings.default_confidence_level
+        ),
         traceability=ComparativeDomainTraceability(
             process_id=catalog_view.process_id,
             document_id=catalog_view.document_id,
             model_id=catalog_view.model_id,
-            source_context_association_catalog_id=catalog_view.catalog_id,
-            source_comparable_group_catalog_id=catalog_view.source_comparable_group_catalog_id,
-            group_id=str(group["group_id"]),
+            source_context_association_catalog_id=(
+                catalog_view.catalog_id
+            ),
+            source_comparable_group_catalog_id=(
+                catalog_view.source_comparable_group_catalog_id
+            ),
+            group_id=str(
+                group["group_id"]
+            ),
             association_id=association.association_id,
-            equivalence_ids=tuple(traceability_raw.get("equivalence_ids", [])),
-            concept_ids=tuple(traceability_raw.get("concept_ids", [])),
-            normalized_concept_ids=tuple(traceability_raw.get("normalized_concept_ids", [])),
-            document_reference=str(traceability_raw.get("document_reference", "")),
-            canonical_reference=str(traceability_raw.get("canonical_reference", "")),
-            original_preserved=bool(traceability_raw.get("original_preserved", True)),
+            equivalence_ids=tuple(
+                traceability_raw.get(
+                    "equivalence_ids",
+                    [],
+                )
+            ),
+            concept_ids=tuple(
+                traceability_raw.get(
+                    "concept_ids",
+                    [],
+                )
+            ),
+            normalized_concept_ids=tuple(
+                traceability_raw.get(
+                    "normalized_concept_ids",
+                    [],
+                )
+            ),
+            document_reference=str(
+                traceability_raw.get(
+                    "document_reference",
+                    "",
+                )
+            ),
+            canonical_reference=str(
+                traceability_raw.get(
+                    "canonical_reference",
+                    "",
+                )
+            ),
+            original_preserved=bool(
+                traceability_raw.get(
+                    "original_preserved",
+                    True,
+                )
+            ),
             context_preserved=True,
             document_ids=tuple(
                 dict.fromkeys(
                     str(document_id)
                     for document_id in (
-                        *traceability_raw.get("document_ids", []),
-                        *group.get("model_reference", {}).get("document_ids", []),
+                        *traceability_raw.get(
+                            "document_ids",
+                            [],
+                        ),
+                        *group.get(
+                            "model_reference",
+                            {},
+                        ).get(
+                            "document_ids",
+                            [],
+                        ),
                     )
                     if str(document_id)
                 )
@@ -108,6 +307,28 @@ def build_comparative_domain_model_record(
             "model_id_prefix": settings.model_id_prefix,
             "model_id_immutable": settings.model_id_immutable,
             "pm6_output_contract": settings.pm6_output_contract,
+            "semantic_knowledge_available": semantic[
+                "semantic_knowledge_available"
+            ],
+            "semantic_fact_ids": semantic[
+                "semantic_fact_ids"
+            ],
+            "semantic_attribute_ids": semantic[
+                "semantic_attribute_ids"
+            ],
+            "semantic_entity_ids": semantic[
+                "semantic_entity_ids"
+            ],
+            "semantic_evidence_ids": semantic[
+                "semantic_evidence_ids"
+            ],
+            "semantic_facts": semantic[
+                "semantic_facts"
+            ],
+            "semantic_knowledge_source": (
+                "comparable_group_builder"
+            ),
+            "semantic_knowledge_preserved": True,
         },
     )
 
