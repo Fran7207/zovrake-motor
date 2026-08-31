@@ -13,7 +13,61 @@ from zovrake_motor.classification.concept_analysis.port import ConceptDetectorPo
 
 
 class ItemConceptDetector(ConceptDetectorPort):
-    """Identifica partidas e ítems del modelo interno como conceptos candidatos."""
+    """
+    Identifica partidas/ítems y, cuando no existe una lista estructurada,
+    recupera candidatos desde el conocimiento semántico del documento.
+
+    La ruta tradicional sigue teniendo prioridad. La ruta semántica funciona
+    como fallback para que un PDF con información distribuida en texto/tablas
+    no quede sin conceptos candidatos.
+    """
+
+    _SEMANTIC_DESCRIPTION_LABELS = {
+        "description",
+        "descripcion",
+        "descripción",
+        "item",
+        "ítem",
+        "producto",
+        "product",
+        "servicio",
+        "service",
+        "concepto",
+        "material",
+        "detalle",
+        "detalle del producto",
+        "nombre del producto",
+        "nombre del servicio",
+    }
+
+    _EXCLUDED_SEMANTIC_LABELS = {
+        "legal_name",
+        "name",
+        "tax_id",
+        "identity_document",
+        "email",
+        "phone",
+        "address",
+        "bank",
+        "account",
+        "bank_account_cci",
+        "bank_account_swift",
+        "bank_account_iban",
+        "price",
+        "unit_price",
+        "amount",
+        "total",
+        "subtotal",
+        "discount",
+        "tax",
+        "percentage",
+        "date",
+        "payment_method",
+        "payment_terms",
+        "delivery_time",
+        "validity",
+        "warranty",
+    }
 
     @property
     def detector_name(self) -> str:
@@ -36,9 +90,17 @@ class ItemConceptDetector(ConceptDetectorPort):
         concepts = []
         sequence = start_sequence
 
-        for index, item in enumerate(model_view.items):
+        # ---------------------------------------------------------
+        # Ruta principal: estructura de ítems ya normalizada.
+        # ---------------------------------------------------------
+        for index, item in enumerate(
+            model_view.items
+        ):
             description = str(
-                item.get("description", "")
+                item.get(
+                    "description",
+                    "",
+                )
             ).strip()
 
             if not description:
@@ -46,7 +108,8 @@ class ItemConceptDetector(ConceptDetectorPort):
 
             kind = (
                 ConceptKind.PARTIDA
-                if item.get("quantity") or item.get("unit")
+                if item.get("quantity")
+                or item.get("unit")
                 else ConceptKind.ITEM
             )
 
@@ -55,8 +118,13 @@ class ItemConceptDetector(ConceptDetectorPort):
                 {},
             )
 
-            if isinstance(raw_fields, dict):
-                item_fields = dict(raw_fields)
+            if isinstance(
+                raw_fields,
+                dict,
+            ):
+                item_fields = dict(
+                    raw_fields
+                )
             else:
                 item_fields = {}
 
@@ -112,11 +180,9 @@ class ItemConceptDetector(ConceptDetectorPort):
                 "fields": item_fields,
                 "semantic_values": normalized_semantic_values,
                 "semantic_columns": normalized_semantic_columns,
+                "knowledge_enrichment_used": False,
             }
 
-            # Las columnas semánticas descubiertas por el documento
-            # también quedan disponibles directamente para las capas
-            # posteriores, sin perder su representación original.
             for key, value in normalized_semantic_values.items():
                 normalized_key = str(
                     key
@@ -126,7 +192,9 @@ class ItemConceptDetector(ConceptDetectorPort):
                     continue
 
                 if normalized_key not in metadata:
-                    metadata[normalized_key] = value
+                    metadata[
+                        normalized_key
+                    ] = value
 
             concepts.append(
                 build_concept(
@@ -169,13 +237,370 @@ class ItemConceptDetector(ConceptDetectorPort):
 
             sequence += 1
 
+        # ---------------------------------------------------------
+        # Fallback semántico:
+        # si el modelo interno no contiene items estructurados,
+        # utilizamos el conocimiento documental ya transportado.
+        #
+        # NO convertimos RUC, totales, bancos, fechas, etc. en conceptos.
+        # Solo usamos hechos cuyo campo representa razonablemente un
+        # producto/servicio/concepto descriptivo.
+        # ---------------------------------------------------------
+        semantic_concepts = self._detect_semantic_candidates(
+            model_view=model_view,
+            start_sequence=sequence,
+        )
+
+        concepts.extend(
+            semantic_concepts
+        )
+
         return DetectorResult(
             detector_type=self.detector_type,
             detector_name=self.detector_name,
             concepts=tuple(concepts),
             technical_observations=(
                 f"items_scanned={len(model_view.items)}",
+                (
+                    "semantic_fallback_used=True"
+                    if not model_view.items
+                    and bool(
+                        semantic_concepts
+                    )
+                    else "semantic_fallback_used=False"
+                ),
+                (
+                    f"semantic_fallback_candidates="
+                    f"{len(semantic_concepts)}"
+                ),
             ),
+        )
+
+    def _detect_semantic_candidates(
+        self,
+        *,
+        model_view: InternalModelView,
+        start_sequence: int,
+    ) -> tuple[Any, ...]:
+        if model_view.items:
+            return ()
+
+        if not model_view.has_document_knowledge:
+            return ()
+
+        facts = model_view.knowledge_facts
+
+        if not facts:
+            return ()
+
+        relationship_by_fact: dict[
+            str,
+            list[dict[str, Any]],
+        ] = {}
+
+        for relationship in model_view.knowledge_relationships:
+            source_id = str(
+                relationship.get(
+                    "source_id",
+                    "",
+                )
+            ).strip()
+
+            if not source_id:
+                continue
+
+            relationship_by_fact.setdefault(
+                source_id,
+                [],
+            ).append(
+                relationship
+            )
+
+        candidates: list[Any] = []
+        seen: set[
+            tuple[str, str, str]
+        ] = set()
+
+        sequence = start_sequence
+
+        for fact in facts:
+            fact_id = str(
+                fact.get(
+                    "fact_id",
+                    "",
+                )
+            ).strip()
+
+            if not fact_id:
+                continue
+
+            label = self._normalize(
+                str(
+                    fact.get(
+                        "normalized_label",
+                        fact.get(
+                            "label",
+                            "",
+                        ),
+                    )
+                )
+            )
+
+            if not self._is_semantic_description_label(
+                label
+            ):
+                continue
+
+            raw_value = str(
+                fact.get(
+                    "raw_value",
+                    "",
+                )
+            ).strip()
+
+            if not self._valid_semantic_description(
+                raw_value
+            ):
+                continue
+
+            source_kind = str(
+                fact.get(
+                    "source_kind",
+                    "",
+                )
+            ).strip()
+
+            page_number = fact.get(
+                "page_number"
+            )
+
+            region_id = str(
+                fact.get(
+                    "region_id",
+                    "",
+                )
+            ).strip()
+
+            signature = (
+                label,
+                self._normalize(raw_value),
+                region_id,
+            )
+
+            if signature in seen:
+                continue
+
+            seen.add(signature)
+
+            entity_id = self._linked_entity_id(
+                fact_id=fact_id,
+                relationships=relationship_by_fact,
+            )
+
+            metadata = {
+                "semantic_source": True,
+                "knowledge_fact_id": fact_id,
+                "knowledge_fact_type": fact.get(
+                    "fact_type",
+                    "",
+                ),
+                "knowledge_label": fact.get(
+                    "label",
+                    "",
+                ),
+                "knowledge_normalized_label": label,
+                "knowledge_raw_value": raw_value,
+                "knowledge_page_number": page_number,
+                "knowledge_region_id": region_id,
+                "knowledge_evidence_id": fact.get(
+                    "evidence_id",
+                    "",
+                ),
+                "knowledge_source_kind": source_kind,
+                "knowledge_confidence": fact.get(
+                    "confidence",
+                    0.0,
+                ),
+                "linked_entity_id": entity_id,
+                "knowledge_relationships": relationship_by_fact.get(
+                    fact_id,
+                    [],
+                ),
+            }
+
+            candidates.append(
+                build_concept(
+                    model_view=model_view,
+                    sequence=sequence,
+                    kind=ConceptKind.ITEM,
+                    original_description=raw_value,
+                    section=self._semantic_section(
+                        fact
+                    ),
+                    entity_id=(
+                        entity_id
+                        or region_id
+                        or "semantic-document"
+                    ),
+                    source_reference=(
+                        f"knowledge://fact/{fact_id}"
+                    ),
+                    canonical_reference="",
+                    extraction_reference=(
+                        str(
+                            fact.get(
+                                "evidence_id",
+                                "",
+                            )
+                        )
+                    ),
+                    entity_index=None,
+                    field_name=label,
+                    metadata=metadata,
+                )
+            )
+
+            sequence += 1
+
+        return tuple(
+            candidates
+        )
+
+    def _is_semantic_description_label(
+        self,
+        label: str,
+    ) -> bool:
+        normalized = self._normalize(
+            label
+        )
+
+        if (
+            normalized
+            in self._EXCLUDED_SEMANTIC_LABELS
+        ):
+            return False
+
+        if (
+            normalized
+            in self._SEMANTIC_DESCRIPTION_LABELS
+        ):
+            return True
+
+        # También permitimos etiquetas descriptivas no presentes en el
+        # diccionario cuando contienen una señal léxica fuerte.
+        tokens = set(
+            normalized.split()
+        )
+
+        return bool(
+            tokens
+            & {
+                "producto",
+                "productos",
+                "servicio",
+                "servicios",
+                "material",
+                "materiales",
+                "item",
+                "ítem",
+                "concepto",
+                "descripcion",
+                "descripción",
+                "detalle",
+            }
+        )
+
+    @staticmethod
+    def _valid_semantic_description(
+        value: str,
+    ) -> bool:
+        normalized = " ".join(
+            value.split()
+        )
+
+        if len(normalized) < 3:
+            return False
+
+        if normalized.casefold() in {
+            "n/a",
+            "na",
+            "no aplica",
+            "no especificado",
+            "pendiente",
+            "sin especificar",
+        }:
+            return False
+
+        # Una descripción de concepto no debe ser exclusivamente numérica.
+        if not any(
+            character.isalpha()
+            for character in normalized
+        ):
+            return False
+
+        return True
+
+    @staticmethod
+    def _linked_entity_id(
+        *,
+        fact_id: str,
+        relationships: dict[
+            str,
+            list[dict[str, Any]],
+        ],
+    ) -> str:
+        candidates = relationships.get(
+            fact_id,
+            [],
+        )
+
+        for relationship in candidates:
+            relationship_type = str(
+                relationship.get(
+                    "relationship_type",
+                    "",
+                )
+            )
+
+            if relationship_type in {
+                "fact_belongs_to",
+                "attribute_belongs_to",
+            }:
+                target = str(
+                    relationship.get(
+                        "target_id",
+                        "",
+                    )
+                ).strip()
+
+                if target:
+                    return target
+
+        return ""
+
+    @staticmethod
+    def _semantic_section(
+        fact: dict[str, Any],
+    ) -> str:
+        section = str(
+            fact.get(
+                "semantic_context",
+                "",
+            )
+        ).strip()
+
+        return (
+            section
+            if section
+            else "document_knowledge"
+        )
+
+    @staticmethod
+    def _normalize(
+        value: str,
+    ) -> str:
+        return " ".join(
+            value.casefold().split()
         )
 
 
