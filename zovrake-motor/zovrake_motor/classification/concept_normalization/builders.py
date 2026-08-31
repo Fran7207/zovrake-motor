@@ -119,6 +119,194 @@ def _build_traceability_from_service(
     )
 
 
+def _build_semantic_metadata(
+    source_metadata: dict[str, Any],
+) -> dict[str, Any]:
+    """
+    Construye una vista semántica estable a partir del metadata enriquecido
+    por el CAE, sin alterar los valores originales.
+
+    Esta estructura prepara la información para EDE/CGB:
+    - identidad de hechos;
+    - etiquetas y valores normalizados;
+    - entidades relacionadas;
+    - evidencias;
+    - razones de vinculación.
+
+    No se inventan atributos ni se recalculan datos del documento.
+    """
+    metadata = dict(source_metadata)
+
+    raw_facts = metadata.get(
+        "knowledge_facts",
+        (),
+    )
+
+    if not isinstance(
+        raw_facts,
+        (list, tuple),
+    ):
+        raw_facts = ()
+
+    semantic_facts: list[dict[str, Any]] = []
+
+    for fact in raw_facts:
+        if not isinstance(
+            fact,
+            dict,
+        ):
+            continue
+
+        fact_id = str(
+            fact.get(
+                "fact_id",
+                "",
+            )
+        ).strip()
+
+        if not fact_id:
+            continue
+
+        semantic_facts.append(
+            {
+                "fact_id": fact_id,
+                "fact_type": str(
+                    fact.get(
+                        "fact_type",
+                        "",
+                    )
+                ),
+                "label": str(
+                    fact.get(
+                        "normalized_label",
+                        fact.get(
+                            "label",
+                            "",
+                        ),
+                    )
+                ),
+                "value": fact.get(
+                    "normalized_value",
+                    fact.get(
+                        "raw_value",
+                        "",
+                    ),
+                ),
+                "raw_value": str(
+                    fact.get(
+                        "raw_value",
+                        "",
+                    )
+                ),
+                "page_number": fact.get(
+                    "page_number",
+                ),
+                "region_id": str(
+                    fact.get(
+                        "region_id",
+                        "",
+                    )
+                ),
+                "evidence_id": str(
+                    fact.get(
+                        "evidence_id",
+                        "",
+                    )
+                ),
+                "confidence": fact.get(
+                    "confidence",
+                    0.0,
+                ),
+                "link_score": fact.get(
+                    "link_score",
+                    0.0,
+                ),
+                "link_reasons": tuple(
+                    fact.get(
+                        "link_reasons",
+                        (),
+                    )
+                    or ()
+                ),
+            }
+        )
+
+    fact_ids = tuple(
+        dict.fromkeys(
+            fact["fact_id"]
+            for fact in semantic_facts
+            if fact["fact_id"]
+        )
+    )
+
+    evidence_ids = tuple(
+        dict.fromkeys(
+            str(
+                value
+            ).strip()
+            for value in metadata.get(
+                "knowledge_evidence_ids",
+                (),
+            )
+            if str(
+                value
+            ).strip()
+        )
+    )
+
+    entity_ids = tuple(
+        dict.fromkeys(
+            str(
+                value
+            ).strip()
+            for value in metadata.get(
+                "knowledge_entity_ids",
+                (),
+            )
+            if str(
+                value
+            ).strip()
+        )
+    )
+
+    attribute_ids = tuple(
+        dict.fromkeys(
+            str(
+                value
+            ).strip()
+            for value in metadata.get(
+                "knowledge_attribute_ids",
+                (),
+            )
+            if str(
+                value
+            ).strip()
+        )
+    )
+
+    return {
+        "semantic_knowledge_available": bool(
+            metadata.get(
+                "knowledge_enrichment_used",
+                False,
+            )
+        ),
+        "fact_ids": fact_ids,
+        "attribute_ids": attribute_ids,
+        "entity_ids": entity_ids,
+        "evidence_ids": evidence_ids,
+        "facts": tuple(
+            semantic_facts
+        ),
+        "enrichment_reason": str(
+            metadata.get(
+                "knowledge_enrichment_reason",
+                "",
+            )
+        ),
+    }
+
+
 def build_normalized_concept_from_material(
     *,
     catalog_view: ClassificationCatalogView,
@@ -138,6 +326,12 @@ def build_normalized_concept_from_material(
 
     if metadata:
         record_metadata.update(metadata)
+
+    record_metadata[
+        "semantic_knowledge"
+    ] = _build_semantic_metadata(
+        record_metadata
+    )
 
     return NormalizedConceptRecord(
         normalized_concept_id=build_normalized_concept_id(
@@ -185,6 +379,12 @@ def build_normalized_concept_from_service(
 
     if metadata:
         record_metadata.update(metadata)
+
+    record_metadata[
+        "semantic_knowledge"
+    ] = _build_semantic_metadata(
+        record_metadata
+    )
 
     return NormalizedConceptRecord(
         normalized_concept_id=build_normalized_concept_id(
