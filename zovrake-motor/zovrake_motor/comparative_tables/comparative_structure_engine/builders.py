@@ -64,6 +64,38 @@ def build_comparative_table_base_structure(
         source_data_preserved=catalog_view.source_data_preserved,
     )
 
+    # El conocimiento semántico ya preservado por PM5/CDMB cruza el límite
+    # PM5 -> PM6 como snapshot de solo lectura. CSE no vuelve a interpretar
+    # el contenido; únicamente lo conserva para las capas posteriores.
+    group_metadata = dict(group_view.metadata)
+    semantic_knowledge = group_metadata.get(
+        "semantic_knowledge",
+        {},
+    )
+    if not isinstance(semantic_knowledge, dict):
+        semantic_knowledge = {}
+
+    semantic_fact_ids = semantic_knowledge.get(
+        "semantic_fact_ids",
+        (),
+    ) or ()
+    semantic_attribute_ids = semantic_knowledge.get(
+        "semantic_attribute_ids",
+        (),
+    ) or ()
+    semantic_entity_ids = semantic_knowledge.get(
+        "semantic_entity_ids",
+        (),
+    ) or ()
+    semantic_evidence_ids = semantic_knowledge.get(
+        "semantic_evidence_ids",
+        (),
+    ) or ()
+    semantic_facts = semantic_knowledge.get(
+        "semantic_facts",
+        (),
+    ) or ()
+
     return ComparativeTableBaseStructure(
         table_id=public_table_id,
         internal_table_id=build_internal_table_id(catalog_view.model_id, internal_sequence),
@@ -92,6 +124,20 @@ def build_comparative_table_base_structure(
             "attribute_snapshot_version": "1.0",
             "provider_snapshot_version": "1.0",
             "organization_snapshot_version": "1.0",
+            "semantic_knowledge": dict(semantic_knowledge),
+            "semantic_knowledge_available": bool(
+                semantic_knowledge.get(
+                    "semantic_knowledge_available",
+                    False,
+                )
+            ),
+            "semantic_fact_ids": [str(value) for value in semantic_fact_ids],
+            "semantic_attribute_ids": [str(value) for value in semantic_attribute_ids],
+            "semantic_entity_ids": [str(value) for value in semantic_entity_ids],
+            "semantic_evidence_ids": [str(value) for value in semantic_evidence_ids],
+            "semantic_facts": list(semantic_facts)
+            if isinstance(semantic_facts, (list, tuple))
+            else [],
         },
         metadata={
             "table_id_prefix": settings.structure_id_prefix,
