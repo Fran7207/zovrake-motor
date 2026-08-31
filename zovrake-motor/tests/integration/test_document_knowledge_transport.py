@@ -17,8 +17,7 @@ from zovrake_motor.motor_runtime.result_registry import (
 )
 
 
-# test_document_knowledge_transport.py
-# está en:
+# Este archivo se encuentra en:
 #
 #   <proyecto>/tests/integration/
 #
@@ -59,6 +58,7 @@ def _build_documents() -> tuple[
 
         documents.append(
             {
+                # Identidad del documento dentro del runtime/API.
                 "document_id": (
                     f"knowledge-transport-{index:03d}"
                 ),
@@ -86,11 +86,22 @@ def test_document_knowledge_reaches_internal_model() -> None:
         -> Canonical
         -> InternalModel
 
-    El conocimiento debe conservarse sin depender de una reconstrucción
-    posterior del PDF.
+    El conocimiento documental debe conservarse hasta el modelo interno.
+
+    Importante:
+        ``DocumentKnowledge.document_id`` representa la identidad utilizada
+        por el procesamiento PDF y actualmente se deriva del ``file_name``.
+        ``InternalModel.document_id`` conserva la identidad del documento
+        proporcionada al runtime.
+
+    Por ello no comparamos ambos identificadores entre sí; comprobamos que
+    cada uno conserve su contrato y que ambos pertenezcan al mismo archivo
+    fuente.
     """
+    raw_documents = _build_documents()
+
     documents = resolve_evidence_documents(
-        _build_documents()
+        raw_documents
     )
 
     executor = CotizacionesAnalysisExecutor(
@@ -117,7 +128,20 @@ def test_document_knowledge_reaches_internal_model() -> None:
         TEST_PDFS
     )
 
-    for model in internal_models:
+    for index, (
+        model,
+        expected_pdf,
+        expected_raw_document,
+        resolved_document,
+    ) in enumerate(
+        zip(
+            internal_models,
+            TEST_PDFS,
+            raw_documents,
+            documents,
+        ),
+        start=1,
+    ):
         metadata_entity = model.get(
             "metadata"
         )
@@ -145,12 +169,64 @@ def test_document_knowledge_reaches_internal_model() -> None:
             dict,
         )
 
-        assert document_knowledge.get(
-            "document_id"
-        ) == model.get(
-            "document_id"
+        # ---------------------------------------------------------
+        # Contrato de identidad del Internal Model.
+        # ---------------------------------------------------------
+        expected_runtime_document_id = str(
+            expected_raw_document[
+                "document_id"
+            ]
         )
 
+        assert (
+            model.get(
+                "document_id"
+            )
+            == expected_runtime_document_id
+        )
+
+        assert (
+            model.get(
+                "file_name"
+            )
+            == expected_pdf.name
+        )
+
+        # ---------------------------------------------------------
+        # Contrato de identidad del DocumentKnowledge.
+        #
+        # La ruta PDF del motor construye el conocimiento usando el
+        # file_name como document_id del conocimiento.
+        # ---------------------------------------------------------
+        assert (
+            document_knowledge.get(
+                "document_id"
+            )
+            == expected_pdf.name
+        )
+
+        assert (
+            document_knowledge.get(
+                "file_name"
+            )
+            == expected_pdf.name
+        )
+
+        # La identidad del conocimiento queda vinculada al mismo archivo
+        # fuente que procesa el Runtime.
+        assert (
+            resolved_document.document_id
+            == expected_runtime_document_id
+        )
+
+        assert (
+            resolved_document.file_name
+            == expected_pdf.name
+        )
+
+        # ---------------------------------------------------------
+        # Conservación del conocimiento documental.
+        # ---------------------------------------------------------
         assert document_knowledge.get(
             "regions"
         )
@@ -188,6 +264,10 @@ def test_document_knowledge_reaches_internal_model() -> None:
             "semantic_model_version"
         )
 
+        # ---------------------------------------------------------
+        # Los contadores transportados deben coincidir exactamente
+        # con el conocimiento que llegó al Internal Model.
+        # ---------------------------------------------------------
         assert (
             extraction_metadata.get(
                 "document_knowledge_entity_count"
@@ -216,6 +296,19 @@ def test_document_knowledge_reaches_internal_model() -> None:
 
         assert (
             extraction_metadata.get(
+                "document_knowledge_attribute_count"
+            )
+            == len(
+                document_knowledge.get(
+                    "attributes",
+                    (),
+                )
+                or ()
+            )
+        )
+
+        assert (
+            extraction_metadata.get(
                 "document_knowledge_relationship_count"
             )
             == len(
@@ -226,3 +319,69 @@ def test_document_knowledge_reaches_internal_model() -> None:
                 or ()
             )
         )
+
+        assert (
+            extraction_metadata.get(
+                "document_knowledge_evidence_count"
+            )
+            == len(
+                document_knowledge.get(
+                    "evidence",
+                    (),
+                )
+                or ()
+            )
+        )
+
+        assert (
+            extraction_metadata.get(
+                "document_knowledge_region_count"
+            )
+            == len(
+                document_knowledge.get(
+                    "regions",
+                    (),
+                )
+                or ()
+            )
+        )
+
+        assert (
+            extraction_metadata.get(
+                "comprehension_knowledge_transport",
+                {},
+            ).get(
+                "enabled"
+            )
+            is True
+        )
+
+        assert (
+            extraction_metadata.get(
+                "comprehension_knowledge_transport",
+                {},
+            ).get(
+                "document_id"
+            )
+            == expected_runtime_document_id
+        )
+
+        # Evita que una iteración termine validando un documento distinto
+        # del PDF que le corresponde.
+        assert expected_pdf.name in {
+            str(
+                expected_raw_document.get(
+                    "document_label",
+                    "",
+                )
+            ),
+            str(
+                expected_raw_document.get(
+                    "metadata",
+                    {},
+                ).get(
+                    "file_name",
+                    "",
+                )
+            ),
+        }
