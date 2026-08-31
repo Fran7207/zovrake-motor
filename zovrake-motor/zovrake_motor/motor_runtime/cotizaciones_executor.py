@@ -368,10 +368,34 @@ class CotizacionesAnalysisExecutor:
         codigo_req: str,
         requirement_description: str,
     ) -> dict[str, Any]:
-        fmt = document.to_adapter_metadata().get("format_type", "pdf")
+        """
+        Ejecuta la comprensión documental individual.
+
+        Regla:
+            1 documento = 1 modelo documental.
+
+        El conocimiento documental unificado ya generado por
+        ``resolve_evidence_documents`` se transporta explícitamente hacia
+        ``ContentExtractionResult.metadata`` para que Canonical, Internal
+        Model y las capas posteriores trabajen sobre la misma representación
+        sin volver a leer el PDF.
+
+        No mezcla conocimiento entre documentos.
+        """
+        fmt = document.to_adapter_metadata().get(
+            "format_type",
+            "pdf",
+        )
+
         file_size = 2048
-        raw_size = document.metadata.get("file_size")
-        if isinstance(raw_size, (int, float)) and raw_size > 0:
+        raw_size = document.metadata.get(
+            "file_size",
+        )
+
+        if isinstance(
+            raw_size,
+            (int, float),
+        ) and raw_size > 0:
             file_size = int(raw_size)
 
         self._comprehension.validate_document(
@@ -382,23 +406,36 @@ class CotizacionesAnalysisExecutor:
                 file_size_bytes=file_size,
             ),
         )
+
         recognition = self._comprehension.recognize_document(
             DocumentRecognitionRequest(
                 process_id=process_id,
                 document_id=document.document_id,
-                file_name=document.file_name or f"{document.document_id}.pdf",
+                file_name=(
+                    document.file_name
+                    or f"{document.document_id}.pdf"
+                ),
             ),
         )
-        adapter_name = recognition.suggested_adapter or "pdf_adapter"
+
+        adapter_name = (
+            recognition.suggested_adapter
+            or "pdf_adapter"
+        )
+
         adapter_context = AdapterDocumentContext(
             process_id=process_id,
             document_id=document.document_id,
             adapter_name=adapter_name,
             format_type=str(fmt),
-            document_reference=f"adapter://{adapter_name}/{document.document_id}",
+            document_reference=(
+                f"adapter://{adapter_name}/"
+                f"{document.document_id}"
+            ),
             original_preserved=True,
             metadata=document.to_adapter_metadata(),
         )
+
         extraction = self._comprehension.extract_content(
             ContentExtractionRequest(
                 process_id=process_id,
@@ -406,9 +443,25 @@ class CotizacionesAnalysisExecutor:
                 adapter_context=adapter_context,
             ),
         )
-        # Garantiza items/tablas desde contenido resuelto si el extractor no los produjo.
-        extraction_dict = extraction.to_dict() if hasattr(extraction, "to_dict") else {}
-        if not extraction.tables and document.tables:
+
+        # ---------------------------------------------------------
+        # Compatibilidad existente:
+        # si el extractor oficial no produce tablas/items, usamos los
+        # datos ya resueltos del documento sin eliminar información.
+        # ---------------------------------------------------------
+        extraction_dict = (
+            extraction.to_dict()
+            if hasattr(
+                extraction,
+                "to_dict",
+            )
+            else {}
+        )
+
+        if (
+            not extraction.tables
+            and document.tables
+        ):
             from zovrake_motor.comprehension.extraction.models import (
                 ContentExtractionResult,
                 ExtractedTable,
@@ -416,92 +469,479 @@ class CotizacionesAnalysisExecutor:
 
             tables = tuple(
                 ExtractedTable(
-                    table_id=str(table.get("table_id", f"table-{index}")),
-                    rows=tuple(tuple(str(cell) for cell in row) for row in table.get("rows", ())),
+                    table_id=str(
+                        table.get(
+                            "table_id",
+                            f"table-{index}",
+                        )
+                    ),
+                    rows=tuple(
+                        tuple(
+                            str(cell)
+                            for cell in row
+                        )
+                        for row in table.get(
+                            "rows",
+                            (),
+                        )
+                    ),
                 )
-                for index, table in enumerate(document.tables)
+                for index, table in enumerate(
+                    document.tables
+                )
             )
-            metadata = dict(extraction.metadata)
-            metadata.update(
+
+            extraction_metadata = dict(
+                extraction.metadata
+            )
+
+            extraction_metadata.update(
                 {
-                    "items": list(document.items),
-                    "provider_name": document.provider_name,
-                    "commercial_currency": document.commercial_currency,
-                    "commercial_total_amount": document.commercial_total_amount,
-                    "commercial_payment_terms": document.commercial_payment_terms,
+                    "items": list(
+                        document.items
+                    ),
+                    "provider_name": (
+                        document.provider_name
+                    ),
+                    "commercial_currency": (
+                        document.commercial_currency
+                    ),
+                    "commercial_total_amount": (
+                        document.commercial_total_amount
+                    ),
+                    "commercial_payment_terms": (
+                        document.commercial_payment_terms
+                    ),
                 }
             )
+
             extraction = ContentExtractionResult(
                 process_id=extraction.process_id,
                 document_id=extraction.document_id,
-                extracted_text=extraction.extracted_text or document.text_content,
+                extracted_text=(
+                    extraction.extracted_text
+                    or document.text_content
+                ),
                 tables=tables,
-                metadata=metadata,
-                structural_elements=extraction.structural_elements,
+                metadata=extraction_metadata,
+                structural_elements=(
+                    extraction.structural_elements
+                ),
                 incidents=extraction.incidents,
-                original_preserved=extraction.original_preserved,
-                ocr_integration_prepared=extraction.ocr_integration_prepared,
-                extractors_executed=extraction.extractors_executed,
-                adapter_name=extraction.adapter_name,
-                technical_observations=extraction.technical_observations,
+                original_preserved=(
+                    extraction.original_preserved
+                ),
+                ocr_integration_prepared=(
+                    extraction.ocr_integration_prepared
+                ),
+                extractors_executed=(
+                    extraction.extractors_executed
+                ),
+                adapter_name=(
+                    extraction.adapter_name
+                ),
+                technical_observations=(
+                    extraction.technical_observations
+                ),
             )
-        elif document.items and "items" not in extraction.metadata:
-            metadata = dict(extraction.metadata)
-            metadata["items"] = list(document.items)
-            metadata.setdefault("provider_name", document.provider_name)
-            metadata.setdefault("commercial_currency", document.commercial_currency)
-            metadata.setdefault("commercial_total_amount", document.commercial_total_amount)
-            metadata.setdefault("commercial_payment_terms", document.commercial_payment_terms)
-            from zovrake_motor.comprehension.extraction.models import ContentExtractionResult
+
+        elif (
+            document.items
+            and "items" not in extraction.metadata
+        ):
+            from zovrake_motor.comprehension.extraction.models import (
+                ContentExtractionResult,
+            )
+
+            extraction_metadata = dict(
+                extraction.metadata
+            )
+
+            extraction_metadata[
+                "items"
+            ] = list(
+                document.items
+            )
+
+            extraction_metadata.setdefault(
+                "provider_name",
+                document.provider_name,
+            )
+            extraction_metadata.setdefault(
+                "commercial_currency",
+                document.commercial_currency,
+            )
+            extraction_metadata.setdefault(
+                "commercial_total_amount",
+                document.commercial_total_amount,
+            )
+            extraction_metadata.setdefault(
+                "commercial_payment_terms",
+                document.commercial_payment_terms,
+            )
 
             extraction = ContentExtractionResult(
                 process_id=extraction.process_id,
                 document_id=extraction.document_id,
-                extracted_text=extraction.extracted_text or document.text_content,
+                extracted_text=(
+                    extraction.extracted_text
+                    or document.text_content
+                ),
                 tables=extraction.tables,
-                metadata=metadata,
-                structural_elements=extraction.structural_elements,
+                metadata=extraction_metadata,
+                structural_elements=(
+                    extraction.structural_elements
+                ),
                 incidents=extraction.incidents,
-                original_preserved=extraction.original_preserved,
-                ocr_integration_prepared=extraction.ocr_integration_prepared,
-                extractors_executed=extraction.extractors_executed,
-                adapter_name=extraction.adapter_name,
-                technical_observations=extraction.technical_observations,
+                original_preserved=(
+                    extraction.original_preserved
+                ),
+                ocr_integration_prepared=(
+                    extraction.ocr_integration_prepared
+                ),
+                extractors_executed=(
+                    extraction.extractors_executed
+                ),
+                adapter_name=(
+                    extraction.adapter_name
+                ),
+                technical_observations=(
+                    extraction.technical_observations
+                ),
             )
 
-        del extraction_dict  # solo para claridad de flujo
+        del extraction_dict
 
-        canonical = self._comprehension.build_canonical_representation(
-            CanonicalRepresentationRequest(
-                process_id=process_id,
-                extraction_result=extraction,
+        # ---------------------------------------------------------
+        # PUENTE DE CONOCIMIENTO DOCUMENTAL
+        #
+        # ``ResolvedDocumentContent`` ya contiene el conocimiento unificado
+        # producido por:
+        #
+        #   PDF
+        #    -> DocumentKnowledgeBuilder
+        #    -> DocumentSemanticAnalyzer
+        #    -> DocumentEntityResolver
+        #    -> DocumentFactExtractor
+        #    -> DocumentFactEntityLinker
+        #
+        # Aquí lo transportamos explícitamente al resultado de extracción
+        # que consumen Canonical e Internal Model.
+        #
+        # No serializamos de nuevo el PDF y no reconstruimos los datos:
+        # solamente preservamos la representación ya calculada.
+        # ---------------------------------------------------------
+        extraction_metadata = dict(
+            extraction.metadata
+        )
+
+        document_knowledge = document.metadata.get(
+            "document_knowledge"
+        )
+
+        if document_knowledge is not None:
+            # El contrato actual normalmente conserva el conocimiento como
+            # diccionario. También aceptamos objetos con ``to_dict`` para
+            # evitar perder conocimiento durante futuras evoluciones del
+            # runtime.
+            if hasattr(
+                document_knowledge,
+                "to_dict",
+            ):
+                document_knowledge = (
+                    document_knowledge.to_dict()
+                )
+
+            if isinstance(
+                document_knowledge,
+                dict,
+            ):
+                knowledge_metadata = (
+                    document_knowledge.get(
+                        "metadata",
+                        {},
+                    )
+                )
+
+                if not isinstance(
+                    knowledge_metadata,
+                    dict,
+                ):
+                    knowledge_metadata = {}
+
+                extraction_metadata[
+                    "document_knowledge"
+                ] = document_knowledge
+
+                extraction_metadata[
+                    "document_knowledge_stage"
+                ] = knowledge_metadata.get(
+                    "semantic_stage",
+                    "unified_document_knowledge",
+                )
+
+                extraction_metadata[
+                    "document_knowledge_model_version"
+                ] = knowledge_metadata.get(
+                    "semantic_model_version",
+                    knowledge_metadata.get(
+                        "knowledge_model_version",
+                        "",
+                    ),
+                )
+
+                extraction_metadata[
+                    "document_knowledge_entity_count"
+                ] = len(
+                    document_knowledge.get(
+                        "entities",
+                        (),
+                    )
+                    or ()
+                )
+
+                extraction_metadata[
+                    "document_knowledge_fact_count"
+                ] = len(
+                    document_knowledge.get(
+                        "facts",
+                        (),
+                    )
+                    or ()
+                )
+
+                extraction_metadata[
+                    "document_knowledge_attribute_count"
+                ] = len(
+                    document_knowledge.get(
+                        "attributes",
+                        (),
+                    )
+                    or ()
+                )
+
+                extraction_metadata[
+                    "document_knowledge_relationship_count"
+                ] = len(
+                    document_knowledge.get(
+                        "relationships",
+                        (),
+                    )
+                    or ()
+                )
+
+                extraction_metadata[
+                    "document_knowledge_evidence_count"
+                ] = len(
+                    document_knowledge.get(
+                        "evidence",
+                        (),
+                    )
+                    or ()
+                )
+
+                extraction_metadata[
+                    "document_knowledge_region_count"
+                ] = len(
+                    document_knowledge.get(
+                        "regions",
+                        (),
+                    )
+                    or ()
+                )
+
+            else:
+                # No convertimos silenciosamente una estructura desconocida
+                # en texto. La marcamos como no transportable.
+                extraction_metadata[
+                    "document_knowledge"
+                ] = None
+
+                extraction_metadata[
+                    "document_knowledge_stage"
+                ] = "unavailable_invalid_type"
+
+                extraction_metadata[
+                    "document_knowledge_transport_error"
+                ] = (
+                    "document_knowledge no es un dict "
+                    "ni expone to_dict()"
+                )
+        else:
+            # La ausencia se registra explícitamente; nunca inventamos
+            # un conocimiento documental inexistente.
+            extraction_metadata[
+                "document_knowledge"
+            ] = None
+
+            extraction_metadata[
+                "document_knowledge_stage"
+            ] = "unavailable"
+
+            extraction_metadata[
+                "document_knowledge_entity_count"
+            ] = 0
+
+            extraction_metadata[
+                "document_knowledge_fact_count"
+            ] = 0
+
+            extraction_metadata[
+                "document_knowledge_attribute_count"
+            ] = 0
+
+            extraction_metadata[
+                "document_knowledge_relationship_count"
+            ] = 0
+
+            extraction_metadata[
+                "document_knowledge_evidence_count"
+            ] = 0
+
+            extraction_metadata[
+                "document_knowledge_region_count"
+            ] = 0
+
+        # Metadatos de identidad y compatibilidad que las capas existentes
+        # continúan utilizando.
+        extraction_metadata.setdefault(
+            "document_id",
+            document.document_id,
+        )
+        extraction_metadata.setdefault(
+            "document_label",
+            document.document_label,
+        )
+        extraction_metadata.setdefault(
+            "file_name",
+            document.file_name,
+        )
+        extraction_metadata.setdefault(
+            "provider_name",
+            document.provider_name,
+        )
+        extraction_metadata.setdefault(
+            "commercial_currency",
+            document.commercial_currency,
+        )
+        extraction_metadata.setdefault(
+            "commercial_total_amount",
+            document.commercial_total_amount,
+        )
+        extraction_metadata.setdefault(
+            "commercial_payment_terms",
+            document.commercial_payment_terms,
+        )
+
+        extraction_metadata[
+            "comprehension_knowledge_transport"
+        ] = {
+            "enabled": (
+                extraction_metadata.get(
+                    "document_knowledge"
+                )
+                is not None
+            ),
+            "source": (
+                "resolved_document_content"
+            ),
+            "document_id": (
+                document.document_id
+            ),
+            "original_preserved": True,
+            "downstream_consumer": (
+                "canonical_and_internal_model"
+            ),
+        }
+
+        extraction = ContentExtractionResult(
+            process_id=extraction.process_id,
+            document_id=extraction.document_id,
+            extracted_text=(
+                extraction.extracted_text
+                or document.text_content
+            ),
+            tables=extraction.tables,
+            metadata=extraction_metadata,
+            structural_elements=(
+                extraction.structural_elements
+            ),
+            incidents=extraction.incidents,
+            original_preserved=(
+                extraction.original_preserved
+            ),
+            ocr_integration_prepared=(
+                extraction.ocr_integration_prepared
+            ),
+            extractors_executed=(
+                extraction.extractors_executed
+            ),
+            adapter_name=(
+                extraction.adapter_name
+            ),
+            technical_observations=(
+                extraction.technical_observations
+                + (
+                    "document_knowledge_transport=True",
+                    "document_knowledge_original_preserved=True",
+                )
             ),
         )
-        model_result = self._comprehension.build_internal_model(
-            InternalModelBuildRequest(
-                process_id=process_id,
-                canonical_result=canonical,
-                requirement_code=codigo_req,
-                requirement_context={"description": requirement_description},
-            ),
+
+        canonical = (
+            self._comprehension
+            .build_canonical_representation(
+                CanonicalRepresentationRequest(
+                    process_id=process_id,
+                    extraction_result=extraction,
+                ),
+            )
         )
-        index_result = self._comprehension.index_document(
-            DocumentIndexRequest(
-                process_id=process_id,
-                model_result=model_result,
-                validation_reference=f"dvf://{document.document_id}",
-            ),
+
+        model_result = (
+            self._comprehension
+            .build_internal_model(
+                InternalModelBuildRequest(
+                    process_id=process_id,
+                    canonical_result=canonical,
+                    requirement_code=codigo_req,
+                    requirement_context={
+                        "description": (
+                            requirement_description
+                        ),
+                    },
+                ),
+            )
         )
+
+        index_result = (
+            self._comprehension
+            .index_document(
+                DocumentIndexRequest(
+                    process_id=process_id,
+                    model_result=model_result,
+                    validation_reference=(
+                        f"dvf://{document.document_id}"
+                    ),
+                ),
+            )
+        )
+
         self._comprehension.integrate_context(
             ContextIntegrationRequest(
                 process_id=process_id,
-                detalles_requerimiento=requirement_description or codigo_req,
+                detalles_requerimiento=(
+                    requirement_description
+                    or codigo_req
+                ),
                 index_result=index_result,
                 model_result=model_result,
                 requirement_code=codigo_req,
             ),
         )
+
         return model_result.model.to_dict()
+
 
     def _run_document_classification(
         self,
