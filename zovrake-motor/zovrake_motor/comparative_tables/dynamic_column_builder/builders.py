@@ -18,6 +18,25 @@ from zovrake_motor.comparative_tables.dynamic_column_builder.models import (
 from zovrake_motor.config.categories.comparative_tables import DynamicColumnBuilderSettings
 
 
+_SEMANTIC_NON_COLUMN_LABELS = {
+    "",
+    "monetary_value",
+    "percentage",
+    "date",
+    "email",
+    "url",
+    "measurement",
+    "identifier",
+    "ruc",
+    "dni",
+    "nit",
+    "cuit",
+    "rif",
+    "rfc",
+    "id",
+}
+
+
 def infer_data_type(value: Any) -> ColumnDataType:
     if isinstance(value, bool):
         return ColumnDataType.BOOLEAN
@@ -30,58 +49,305 @@ def infer_data_type(value: Any) -> ColumnDataType:
     return ColumnDataType.STRING
 
 
+def _normalize_attribute_name(name: Any) -> str:
+    return " ".join(
+        str(name).strip().casefold().split()
+    )
+
+
+def _semantic_fact_column_candidate(
+    fact: dict[str, Any],
+) -> tuple[str, str, ColumnDataType, Any] | None:
+    """
+    Convierte un hecho semántico en candidato de columna únicamente cuando
+    el hecho contiene una etiqueta útil para comparación.
+
+    Los hechos genéricos (moneda aislada, fecha aislada, medición aislada,
+    identificador aislado, etc.) no se convierten automáticamente en columnas.
+    Un hecho etiquetado sí puede hacerlo, por ejemplo:
+
+        quantity=138
+        unit=UNIDAD
+        description=CEMENTO PORTLAND TIPO I
+        unit_price=19.90
+    """
+    label = str(
+        fact.get(
+            "label",
+            fact.get(
+                "normalized_label",
+                "",
+            ),
+        )
+    ).strip()
+
+    normalized_label = _normalize_attribute_name(
+        label
+    )
+
+    if (
+        not normalized_label
+        or normalized_label in _SEMANTIC_NON_COLUMN_LABELS
+    ):
+        return None
+
+    fact_type = _normalize_attribute_name(
+        fact.get(
+            "fact_type",
+            "",
+        )
+    )
+
+    # Solo los hechos con semántica de campo/atributo aportan una columna.
+    if fact_type not in {
+        "labeled_value",
+        "table_field",
+    }:
+        return None
+
+    value = fact.get(
+        "value",
+        fact.get(
+            "raw_value",
+            "",
+        ),
+    )
+
+    return (
+        label,
+        "semantic",
+        infer_data_type(value),
+        value,
+    )
+
+
 def extract_attribute_candidates(
     available_attributes: dict[str, Any],
+    semantic_knowledge: dict[str, Any] | None = None,
 ) -> list[tuple[str, str, ColumnDataType, Any]]:
     """
-    Extrae candidatos de atributos desde el snapshot del CSE.
+    Extrae candidatos de columnas desde dos fuentes:
 
-    Retorna tuplas (nombre, fuente, tipo, valor_referencia).
+    1. atributos estructurados tradicionales del CSE;
+    2. hechos semánticos ya preservados por PM5/CDMB.
+
+    La segunda fuente es complementaria. Nunca reemplaza la primera.
+
+    Retorna tuplas:
+        (nombre, fuente, tipo, valor_referencia)
+
+    Las dos fuentes se deduplican por nombre normalizado.
     """
     candidates: list[tuple[str, str, ColumnDataType, Any]] = []
     seen_names: set[str] = set()
 
-    commercial = dict(available_attributes.get("commercial", {}))
-    for name, value in sorted(commercial.items()):
-        normalized = str(name).strip().lower()
-        if not normalized or normalized in seen_names:
-            continue
-        seen_names.add(normalized)
-        candidates.append((str(name), "commercial", infer_data_type(value), value))
+    commercial = dict(
+        available_attributes.get(
+            "commercial",
+            {},
+        )
+    )
 
-    technical = dict(available_attributes.get("technical", {}))
-    for name, value in sorted(technical.items()):
-        normalized = str(name).strip().lower()
-        if not normalized or normalized in seen_names:
-            continue
-        seen_names.add(normalized)
-        candidates.append((str(name), "technical", infer_data_type(value), value))
+    for name, value in sorted(
+        commercial.items()
+    ):
+        normalized = _normalize_attribute_name(
+            name
+        )
 
-    specifications = available_attributes.get("specifications", [])
-    if isinstance(specifications, list):
+        if (
+            not normalized
+            or normalized in seen_names
+        ):
+            continue
+
+        seen_names.add(
+            normalized
+        )
+
+        candidates.append(
+            (
+                str(name),
+                "commercial",
+                infer_data_type(value),
+                value,
+            )
+        )
+
+    technical = dict(
+        available_attributes.get(
+            "technical",
+            {},
+        )
+    )
+
+    for name, value in sorted(
+        technical.items()
+    ):
+        normalized = _normalize_attribute_name(
+            name
+        )
+
+        if (
+            not normalized
+            or normalized in seen_names
+        ):
+            continue
+
+        seen_names.add(
+            normalized
+        )
+
+        candidates.append(
+            (
+                str(name),
+                "technical",
+                infer_data_type(value),
+                value,
+            )
+        )
+
+    specifications = available_attributes.get(
+        "specifications",
+        [],
+    )
+
+    if isinstance(
+        specifications,
+        (list, tuple),
+    ):
         for specification in specifications:
-            name = str(specification).strip()
-            normalized = name.lower()
-            if not normalized or normalized in seen_names:
-                continue
-            seen_names.add(normalized)
-            candidates.append((name, "specification", ColumnDataType.SPECIFICATION, specification))
+            name = str(
+                specification
+            ).strip()
 
-    primary_item = str(available_attributes.get("primary_item", "")).strip()
+            normalized = _normalize_attribute_name(
+                name
+            )
+
+            if (
+                not normalized
+                or normalized in seen_names
+            ):
+                continue
+
+            seen_names.add(
+                normalized
+            )
+
+            candidates.append(
+                (
+                    name,
+                    "specification",
+                    ColumnDataType.SPECIFICATION,
+                    specification,
+                )
+            )
+
+    primary_item = str(
+        available_attributes.get(
+            "primary_item",
+            "",
+        )
+    ).strip()
+
     if primary_item:
-        normalized = primary_item.lower()
-        if normalized not in seen_names:
-            seen_names.add(normalized)
-            candidates.append((primary_item, "primary_item", ColumnDataType.STRING, primary_item))
+        normalized = _normalize_attribute_name(
+            primary_item
+        )
+
+        if (
+            normalized
+            and normalized not in seen_names
+        ):
+            seen_names.add(
+                normalized
+            )
+
+            candidates.append(
+                (
+                    primary_item,
+                    "primary_item",
+                    ColumnDataType.STRING,
+                    primary_item,
+                )
+            )
+
+    # -------------------------------------------------------------
+    # Conocimiento semántico.
+    #
+    # Se agrega después de los atributos estructurados para que, si
+    # "Precio" ya existe en CSE, el hecho semántico equivalente no cree
+    # una segunda columna.
+    # -------------------------------------------------------------
+    if isinstance(
+        semantic_knowledge,
+        dict,
+    ):
+        semantic_facts = semantic_knowledge.get(
+            "semantic_facts",
+            (),
+        )
+
+        if isinstance(
+            semantic_facts,
+            (list, tuple),
+        ):
+            for fact in semantic_facts:
+                if not isinstance(
+                    fact,
+                    dict,
+                ):
+                    continue
+
+                candidate = _semantic_fact_column_candidate(
+                    fact
+                )
+
+                if candidate is None:
+                    continue
+
+                name, source, data_type, reference_value = candidate
+
+                normalized = _normalize_attribute_name(
+                    name
+                )
+
+                if (
+                    not normalized
+                    or normalized in seen_names
+                ):
+                    continue
+
+                seen_names.add(
+                    normalized
+                )
+
+                candidates.append(
+                    (
+                        name,
+                        source,
+                        data_type,
+                        reference_value,
+                    )
+                )
 
     return candidates
 
 
-def build_public_column_id(sequence: int, *, prefix: str, padding: int) -> str:
+def build_public_column_id(
+    sequence: int,
+    *,
+    prefix: str,
+    padding: int,
+) -> str:
     return f"{prefix}-{sequence:0{padding}d}"
 
 
-def build_internal_column_id(table_id: str, sequence: int) -> str:
+def build_internal_column_id(
+    table_id: str,
+    sequence: int,
+) -> str:
     return f"dcb://{table_id}/column-{sequence:04d}"
 
 
@@ -118,9 +384,52 @@ def build_column_definition(
     reference_value: Any,
     settings: DynamicColumnBuilderSettings,
 ) -> ComparativeTableColumnDefinition:
+    semantic_knowledge = structure_view.semantic_knowledge
+
+    semantic_fact_ids = []
+    semantic_evidence_ids = []
+    semantic_entity_ids = []
+    semantic_attribute_ids = []
+
+    if isinstance(
+        semantic_knowledge,
+        dict,
+    ):
+        semantic_fact_ids = list(
+            semantic_knowledge.get(
+                "semantic_fact_ids",
+                (),
+            )
+            or ()
+        )
+        semantic_evidence_ids = list(
+            semantic_knowledge.get(
+                "semantic_evidence_ids",
+                (),
+            )
+            or ()
+        )
+        semantic_entity_ids = list(
+            semantic_knowledge.get(
+                "semantic_entity_ids",
+                (),
+            )
+            or ()
+        )
+        semantic_attribute_ids = list(
+            semantic_knowledge.get(
+                "semantic_attribute_ids",
+                (),
+            )
+            or ()
+        )
+
     return ComparativeTableColumnDefinition(
         column_id=public_column_id,
-        internal_column_id=build_internal_column_id(structure_view.table_id, internal_sequence),
+        internal_column_id=build_internal_column_id(
+            structure_view.table_id,
+            internal_sequence,
+        ),
         attribute_name=attribute_name,
         data_type=data_type,
         logical_position=logical_position,
@@ -137,6 +446,21 @@ def build_column_definition(
             "attribute_source": attribute_source,
             "reference_value_type": type(reference_value).__name__,
             "provider_values_prepared": False,
+            "semantic_knowledge_used": (
+                attribute_source == "semantic"
+            ),
+            "semantic_fact_ids": semantic_fact_ids
+            if attribute_source == "semantic"
+            else [],
+            "semantic_attribute_ids": semantic_attribute_ids
+            if attribute_source == "semantic"
+            else [],
+            "semantic_entity_ids": semantic_entity_ids
+            if attribute_source == "semantic"
+            else [],
+            "semantic_evidence_ids": semantic_evidence_ids
+            if attribute_source == "semantic"
+            else [],
         },
     )
 
@@ -148,16 +472,32 @@ def build_column_set_for_structure(
     settings: DynamicColumnBuilderSettings,
     start_sequence: int,
 ) -> tuple[ComparativeTableColumnSet, int]:
-    candidates = extract_attribute_candidates(structure_view.available_attributes)
-    columns: list[ComparativeTableColumnDefinition] = []
+    candidates = extract_attribute_candidates(
+        structure_view.available_attributes,
+        structure_view.semantic_knowledge,
+    )
+
+    columns: list[
+        ComparativeTableColumnDefinition
+    ] = []
+
     sequence = start_sequence
 
-    for position, (name, source, data_type, reference_value) in enumerate(candidates, start=1):
+    for position, (
+        name,
+        source,
+        data_type,
+        reference_value,
+    ) in enumerate(
+        candidates,
+        start=1,
+    ):
         public_column_id = build_public_column_id(
             sequence,
             prefix=settings.column_id_prefix,
             padding=settings.column_id_padding,
         )
+
         columns.append(
             build_column_definition(
                 catalog_view=catalog_view,
@@ -170,33 +510,49 @@ def build_column_set_for_structure(
                 internal_sequence=sequence,
                 reference_value=reference_value,
                 settings=settings,
-            ),
+            )
         )
+
         sequence += 1
 
     column_set = ComparativeTableColumnSet(
         table_id=structure_view.table_id,
         group_id=structure_view.group_id,
-        columns=tuple(columns),
+        columns=tuple(
+            columns
+        ),
         source_structure_catalog_id=catalog_view.catalog_id,
     )
+
     return column_set, sequence
 
 
 def build_column_catalog(
     *,
     catalog_view: StructureCatalogView,
-    column_sets: tuple[ComparativeTableColumnSet, ...],
+    column_sets: tuple[
+        ComparativeTableColumnSet,
+        ...,
+    ],
     dynamic_row_builder_prepared: bool,
 ) -> ComparativeTableColumnCatalog:
     return ComparativeTableColumnCatalog(
-        catalog_id=f"dcb-catalog://{catalog_view.model_id}",
+        catalog_id=(
+            f"dcb-catalog://"
+            f"{catalog_view.model_id}"
+        ),
         process_id=catalog_view.process_id,
         model_id=catalog_view.model_id,
         document_id=catalog_view.document_id,
-        source_structure_catalog_id=catalog_view.catalog_id,
+        source_structure_catalog_id=(
+            catalog_view.catalog_id
+        ),
         column_sets=column_sets,
-        dynamic_row_builder_prepared=dynamic_row_builder_prepared,
+        dynamic_row_builder_prepared=(
+            dynamic_row_builder_prepared
+        ),
         structure_catalog_preserved=True,
-        domain_model_preserved=catalog_view.domain_model_preserved,
+        domain_model_preserved=(
+            catalog_view.domain_model_preserved
+        ),
     )
