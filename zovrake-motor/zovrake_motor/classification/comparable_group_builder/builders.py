@@ -24,6 +24,127 @@ MATERIAL_CONCEPT_TYPES = frozenset({"material", "partida"})
 SERVICE_CONCEPT_TYPES = frozenset({"service", "technical_element", "commercial_element", "observation"})
 
 
+def _semantic_group_provenance(
+    relations: tuple[EquivalenceRecord, ...],
+) -> dict[str, Any]:
+    """
+    Consolida la procedencia semántica ya calculada por EDE.
+
+    CGB no vuelve a leer documentos ni recalcula equivalencias. Solo transporta
+    IDs, hechos y evidencias que ya existen en EquivalenceRecord.metadata.
+    """
+    fact_ids: list[str] = []
+    attribute_ids: list[str] = []
+    entity_ids: list[str] = []
+    evidence_ids: list[str] = []
+    facts: list[dict[str, Any]] = []
+
+    for relation in relations:
+        metadata = relation.metadata
+
+        fact_ids.extend(
+            str(value).strip()
+            for value in metadata.get(
+                "semantic_fact_ids",
+                (),
+            )
+            if str(value).strip()
+        )
+        attribute_ids.extend(
+            str(value).strip()
+            for value in metadata.get(
+                "semantic_attribute_ids",
+                (),
+            )
+            if str(value).strip()
+        )
+        entity_ids.extend(
+            str(value).strip()
+            for value in metadata.get(
+                "semantic_entity_ids",
+                (),
+            )
+            if str(value).strip()
+        )
+        evidence_ids.extend(
+            str(value).strip()
+            for value in metadata.get(
+                "semantic_evidence_ids",
+                (),
+            )
+            if str(value).strip()
+        )
+
+        raw_facts = metadata.get(
+            "semantic_facts",
+            (),
+        )
+
+        if isinstance(
+            raw_facts,
+            (list, tuple),
+        ):
+            for fact in raw_facts:
+                if isinstance(
+                    fact,
+                    dict,
+                ):
+                    facts.append(
+                        dict(fact)
+                    )
+
+    unique_fact_map: dict[str, dict[str, Any]] = {}
+
+    for fact in facts:
+        fact_id = str(
+            fact.get(
+                "fact_id",
+                "",
+            )
+        ).strip()
+
+        if fact_id:
+            unique_fact_map.setdefault(
+                fact_id,
+                fact,
+            )
+
+    return {
+        "semantic_knowledge_available": any(
+            bool(
+                relation.metadata.get(
+                    "semantic_knowledge_available",
+                    False,
+                )
+            )
+            for relation in relations
+        ),
+        "fact_ids": tuple(
+            dict.fromkeys(
+                fact_ids
+            )
+        ),
+        "attribute_ids": tuple(
+            dict.fromkeys(
+                attribute_ids
+            )
+        ),
+        "entity_ids": tuple(
+            dict.fromkeys(
+                entity_ids
+            )
+        ),
+        "evidence_ids": tuple(
+            dict.fromkeys(
+                evidence_ids
+            )
+        ),
+        "facts": tuple(
+            unique_fact_map.values()
+        ),
+    }
+
+
 class _UnionFind:
     def __init__(self, nodes: tuple[str, ...]) -> None:
         self._parent = {node: node for node in nodes}
@@ -137,6 +258,10 @@ def build_comparable_group_record(
     concept_type = _concept_type_from_relations(relations, normalized_concept_ids[0])
     first_relation = relations[0]
 
+    semantic_provenance = _semantic_group_provenance(
+        relations
+    )
+
     return ComparableGroupRecord(
         group_id=public_group_id,
         internal_group_id=build_internal_group_id(catalog_view.model_id, internal_sequence),
@@ -183,6 +308,24 @@ def build_comparable_group_record(
             "members_count": len(normalized_concept_ids),
             "document_count": len(sorted_document_ids),
             "cross_document_group": len(sorted_document_ids) > 1,
+            "semantic_knowledge_available": semantic_provenance[
+                "semantic_knowledge_available"
+            ],
+            "semantic_fact_ids": semantic_provenance[
+                "fact_ids"
+            ],
+            "semantic_attribute_ids": semantic_provenance[
+                "attribute_ids"
+            ],
+            "semantic_entity_ids": semantic_provenance[
+                "entity_ids"
+            ],
+            "semantic_evidence_ids": semantic_provenance[
+                "evidence_ids"
+            ],
+            "semantic_facts": semantic_provenance[
+                "facts"
+            ],
         },
     )
 
