@@ -39,7 +39,11 @@ from zovrake_motor.comparative_tables.traceability_metadata_engine.models import
 )
 from zovrake_motor.comprehension.canonical.models import CanonicalRepresentationRequest
 from zovrake_motor.comprehension.context_integration.models import ContextIntegrationRequest
-from zovrake_motor.comprehension.extraction.models import AdapterDocumentContext, ContentExtractionRequest
+from zovrake_motor.comprehension.extraction.models import (
+    AdapterDocumentContext,
+    ContentExtractionRequest,
+    ContentExtractionResult,
+)
 from zovrake_motor.comprehension.internal_model.models import InternalModelBuildRequest
 from zovrake_motor.comprehension.knowledge_index.models import DocumentIndexRequest
 from zovrake_motor.comprehension.recognition.models import DocumentRecognitionRequest
@@ -463,7 +467,6 @@ class CotizacionesAnalysisExecutor:
             and document.tables
         ):
             from zovrake_motor.comprehension.extraction.models import (
-                ContentExtractionResult,
                 ExtractedTable,
             )
 
@@ -549,10 +552,6 @@ class CotizacionesAnalysisExecutor:
             document.items
             and "items" not in extraction.metadata
         ):
-            from zovrake_motor.comprehension.extraction.models import (
-                ContentExtractionResult,
-            )
-
             extraction_metadata = dict(
                 extraction.metadata
             )
