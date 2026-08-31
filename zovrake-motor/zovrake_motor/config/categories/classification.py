@@ -115,6 +115,15 @@ class EquivalenceDetectionSettings:
     exact_match_detector_enabled: bool = True
     cross_type_distinct_detector_enabled: bool = True
     shared_origin_relation_detector_enabled: bool = True
+
+    # Evaluación semántica adicional de EDE.
+    #
+    # Esta capa produce señales de similitud/relación, pero no declara
+    # equivalencia por sí sola.
+    semantic_similarity_enabled: bool = True
+    semantic_similarity_related_threshold: float = 0.70
+    semantic_similarity_cross_document_only: bool = True
+
     comparable_group_builder_prepared: bool = True
     context_association_prepared: bool = True
     comparative_domain_model_prepared: bool = True
