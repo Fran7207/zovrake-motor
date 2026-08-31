@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import re
+from typing import Any
+
 from zovrake_motor.classification.concept_analysis.builders import build_concept
 from zovrake_motor.classification.concept_analysis.enums import (
     ConceptDetectorType,
@@ -180,7 +183,11 @@ class ItemConceptDetector(ConceptDetectorPort):
                 "fields": item_fields,
                 "semantic_values": normalized_semantic_values,
                 "semantic_columns": normalized_semantic_columns,
-                "knowledge_enrichment_used": False,
+                **self._enrich_item_from_document_knowledge(
+                    model_view=model_view,
+                    item=item,
+                    description=description,
+                ),
             }
 
             for key, value in normalized_semantic_values.items():
@@ -273,6 +280,522 @@ class ItemConceptDetector(ConceptDetectorPort):
                     f"semantic_fallback_candidates="
                     f"{len(semantic_concepts)}"
                 ),
+            ),
+        )
+
+    def _enrich_item_from_document_knowledge(
+        self,
+        *,
+        model_view: InternalModelView,
+        item: dict[str, Any],
+        description: str,
+    ) -> dict[str, Any]:
+        """
+        Enriquece un ítem estructurado con conocimiento documental ya resuelto.
+
+        Esta ruta nunca crea un concepto adicional. Solo adjunta hechos que
+        tienen una relación suficientemente fuerte con el ítem existente.
+
+        Prioridad de asociación:
+            1. evidence_id compartido;
+            2. region_id compartido;
+            3. misma página + coincidencia textual fuerte;
+            4. coincidencia textual fuerte en el valor descriptivo.
+
+        Los hechos ambiguos se excluyen para no contaminar el concepto.
+        """
+        if not model_view.has_document_knowledge:
+            return {
+                "knowledge_enrichment_used": False,
+                "knowledge_enrichment_reason": (
+                    "document_knowledge_unavailable"
+                ),
+                "knowledge_fact_ids": (),
+                "knowledge_attribute_ids": (),
+                "knowledge_entity_ids": (),
+                "knowledge_evidence_ids": (),
+                "knowledge_facts": (),
+            }
+
+        facts = model_view.knowledge_facts
+
+        if not facts:
+            return {
+                "knowledge_enrichment_used": False,
+                "knowledge_enrichment_reason": (
+                    "no_knowledge_facts"
+                ),
+                "knowledge_fact_ids": (),
+                "knowledge_attribute_ids": (),
+                "knowledge_entity_ids": (),
+                "knowledge_evidence_ids": (),
+                "knowledge_facts": (),
+            }
+
+        item_evidence_ids = self._item_evidence_ids(
+            item
+        )
+
+        item_region_id = str(
+            item.get(
+                "region_id",
+                item.get(
+                    "source_region_id",
+                    "",
+                ),
+            )
+        ).strip()
+
+        item_page = item.get(
+            "page_number",
+            item.get(
+                "source_page_number"
+            ),
+        )
+
+        item_tokens = self._content_tokens(
+            description
+        )
+
+        relationship_by_fact: dict[
+            str,
+            tuple[dict[str, Any], ...],
+        ] = {}
+
+        for relationship in model_view.knowledge_relationships:
+            source_id = str(
+                relationship.get(
+                    "source_id",
+                    "",
+                )
+            ).strip()
+
+            if not source_id:
+                continue
+
+            relationship_by_fact.setdefault(
+                source_id,
+                (),
+            )
+
+            relationship_by_fact[source_id] = (
+                *relationship_by_fact[source_id],
+                relationship,
+            )
+
+        matched: list[
+            tuple[
+                float,
+                dict[str, Any],
+            ]
+        ] = []
+
+        for fact in facts:
+            fact_id = str(
+                fact.get(
+                    "fact_id",
+                    "",
+                )
+            ).strip()
+
+            if not fact_id:
+                continue
+
+            label = self._normalize(
+                str(
+                    fact.get(
+                        "normalized_label",
+                        fact.get(
+                            "label",
+                            "",
+                        ),
+                    )
+                )
+            )
+
+            raw_value = str(
+                fact.get(
+                    "raw_value",
+                    "",
+                )
+            ).strip()
+
+            if not raw_value:
+                continue
+
+            if label in self._EXCLUDED_SEMANTIC_LABELS:
+                # No arrastramos datos financieros, identidad o condiciones
+                # administrativas como si fueran atributos del producto.
+                continue
+
+            score = 0.0
+            reasons: list[str] = []
+
+            fact_evidence = str(
+                fact.get(
+                    "evidence_id",
+                    "",
+                )
+            ).strip()
+
+            fact_region_id = str(
+                fact.get(
+                    "region_id",
+                    "",
+                )
+            ).strip()
+
+            fact_page = fact.get(
+                "page_number"
+            )
+
+            if (
+                fact_evidence
+                and fact_evidence in item_evidence_ids
+            ):
+                score += 0.60
+                reasons.append(
+                    "shared_evidence"
+                )
+
+            if (
+                item_region_id
+                and fact_region_id
+                and item_region_id == fact_region_id
+            ):
+                score += 0.22
+                reasons.append(
+                    "same_region"
+                )
+
+            if (
+                item_page is not None
+                and fact_page is not None
+                and item_page == fact_page
+            ):
+                score += 0.08
+                reasons.append(
+                    "same_page"
+                )
+
+            overlap = self._token_overlap(
+                item_tokens,
+                self._content_tokens(
+                    raw_value
+                ),
+            )
+
+            if overlap >= 0.75:
+                score += 0.35
+                reasons.append(
+                    "strong_description_overlap"
+                )
+            elif overlap >= 0.50:
+                score += 0.18
+                reasons.append(
+                    "moderate_description_overlap"
+                )
+
+            if score < 0.60:
+                continue
+
+            enriched_fact = dict(
+                fact
+            )
+
+            enriched_fact[
+                "link_score"
+            ] = round(
+                min(
+                    score,
+                    1.0,
+                ),
+                4,
+            )
+
+            enriched_fact[
+                "link_reasons"
+            ] = tuple(
+                dict.fromkeys(
+                    reasons
+                )
+            )
+
+            matched.append(
+                (
+                    score,
+                    enriched_fact,
+                )
+            )
+
+        matched.sort(
+            key=lambda item: (
+                item[0],
+                float(
+                    item[1].get(
+                        "confidence",
+                        0.0,
+                    )
+                    or 0.0
+                ),
+            ),
+            reverse=True,
+        )
+
+        # Se descartan hechos casi equivalentes que podrían proceder de
+        # distintas apariciones del mismo texto. Conservamos la evidencia
+        # más fuerte por normalized_label + normalized value.
+        selected: list[
+            dict[str, Any]
+        ] = []
+
+        seen_signatures: set[
+            tuple[str, str]
+        ] = set()
+
+        for score, fact in matched:
+            signature = (
+                self._normalize(
+                    str(
+                        fact.get(
+                            "normalized_label",
+                            "",
+                        )
+                    )
+                ),
+                self._normalize(
+                    str(
+                        fact.get(
+                            "raw_value",
+                            "",
+                        )
+                    )
+                ),
+            )
+
+            if signature in seen_signatures:
+                continue
+
+            seen_signatures.add(
+                signature
+            )
+            selected.append(
+                fact
+            )
+
+        if not selected:
+            return {
+                "knowledge_enrichment_used": False,
+                "knowledge_enrichment_reason": (
+                    "no_sufficient_fact_match"
+                ),
+                "knowledge_fact_ids": (),
+                "knowledge_attribute_ids": (),
+                "knowledge_entity_ids": (),
+                "knowledge_evidence_ids": (),
+                "knowledge_facts": (),
+            }
+
+        fact_ids = tuple(
+            str(
+                fact.get(
+                    "fact_id",
+                    "",
+                )
+            )
+            for fact in selected
+            if str(
+                fact.get(
+                    "fact_id",
+                    "",
+                )
+            )
+        )
+
+        attribute_ids = tuple(
+            str(
+                fact.get(
+                    "fact_id",
+                    "",
+                )
+            )
+            for fact in selected
+            if fact.get(
+                "fact_type"
+            ) in {
+                "labeled_value",
+                "table_field",
+            }
+            and str(
+                fact.get(
+                    "fact_id",
+                    "",
+                )
+            )
+        )
+
+        entity_ids: list[str] = []
+        evidence_ids: list[str] = []
+
+        for fact in selected:
+            evidence_id = str(
+                fact.get(
+                    "evidence_id",
+                    "",
+                )
+            ).strip()
+
+            if (
+                evidence_id
+                and evidence_id not in evidence_ids
+            ):
+                evidence_ids.append(
+                    evidence_id
+                )
+
+            for relationship in relationship_by_fact.get(
+                str(
+                    fact.get(
+                        "fact_id",
+                        "",
+                    )
+                ),
+                (),
+            ):
+                relationship_type = str(
+                    relationship.get(
+                        "relationship_type",
+                        "",
+                    )
+                )
+
+                if relationship_type not in {
+                    "fact_belongs_to",
+                    "attribute_belongs_to",
+                }:
+                    continue
+
+                entity_id = str(
+                    relationship.get(
+                        "target_id",
+                        "",
+                    )
+                ).strip()
+
+                if (
+                    entity_id
+                    and entity_id not in entity_ids
+                ):
+                    entity_ids.append(
+                        entity_id
+                    )
+
+        return {
+            "knowledge_enrichment_used": True,
+            "knowledge_enrichment_reason": (
+                "evidence_and_context_match"
+            ),
+            "knowledge_fact_ids": fact_ids,
+            "knowledge_attribute_ids": attribute_ids,
+            "knowledge_entity_ids": tuple(
+                entity_ids
+            ),
+            "knowledge_evidence_ids": tuple(
+                evidence_ids
+            ),
+            "knowledge_facts": tuple(
+                selected
+            ),
+        }
+
+    @staticmethod
+    def _item_evidence_ids(
+        item: dict[str, Any],
+    ) -> set[str]:
+        values: list[str] = []
+
+        for key in (
+            "evidence_id",
+            "source_evidence_id",
+            "knowledge_evidence_id",
+        ):
+            value = str(
+                item.get(
+                    key,
+                    "",
+                )
+            ).strip()
+
+            if value:
+                values.append(
+                    value
+                )
+
+        raw_evidence = item.get(
+            "evidence_ids",
+            (),
+        )
+
+        if isinstance(
+            raw_evidence,
+            (list, tuple, set),
+        ):
+            values.extend(
+                str(value).strip()
+                for value in raw_evidence
+                if str(value).strip()
+            )
+
+        return set(values)
+
+    @staticmethod
+    def _content_tokens(
+        value: str,
+    ) -> set[str]:
+        normalized = value.casefold()
+
+        tokens = re.findall(
+            r"[a-záéíóúüñ0-9]{3,}",
+            normalized,
+        )
+
+        stopwords = {
+            "para",
+            "con",
+            "del",
+            "las",
+            "los",
+            "una",
+            "unos",
+            "por",
+            "como",
+            "que",
+            "tipo",
+        }
+
+        return {
+            token
+            for token in tokens
+            if token not in stopwords
+        }
+
+    @staticmethod
+    def _token_overlap(
+        left: set[str],
+        right: set[str],
+    ) -> float:
+        if not left or not right:
+            return 0.0
+
+        intersection = left & right
+
+        return len(
+            intersection
+        ) / max(
+            1,
+            min(
+                len(left),
+                len(right),
             ),
         )
 
