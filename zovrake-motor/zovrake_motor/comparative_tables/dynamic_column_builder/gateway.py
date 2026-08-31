@@ -21,6 +21,7 @@ class StructureView:
     group_type: str
     comparative_model_id: str
     available_attributes: dict[str, Any]
+    semantic_knowledge: dict[str, Any]
     traceability: dict[str, Any]
     metadata: dict[str, Any]
 
@@ -43,17 +44,50 @@ class StructureCatalogView:
 def _parse_structure(payload: dict[str, Any]) -> StructureView:
     domain_reference = dict(payload.get("domain_reference", {}))
     metadata_prepared = dict(payload.get("metadata_prepared", {}))
-    available_attributes = dict(metadata_prepared.get("available_attributes", {}))
+    available_attributes = dict(
+        metadata_prepared.get(
+            "available_attributes",
+            {},
+        )
+    )
+
+    semantic_knowledge = metadata_prepared.get(
+        "semantic_knowledge",
+        {},
+    )
+    if not isinstance(
+        semantic_knowledge,
+        dict,
+    ):
+        semantic_knowledge = {}
 
     return StructureView(
         table_id=str(payload["table_id"]),
         internal_table_id=str(payload.get("internal_table_id", "")),
         group_id=str(payload["group_id"]),
         group_type=str(payload.get("group_type", "")),
-        comparative_model_id=str(domain_reference.get("comparative_model_id", "")),
+        comparative_model_id=str(
+            domain_reference.get(
+                "comparative_model_id",
+                "",
+            )
+        ),
         available_attributes=available_attributes,
-        traceability=dict(payload.get("traceability", {})),
-        metadata=dict(payload.get("metadata", {})),
+        semantic_knowledge=dict(
+            semantic_knowledge
+        ),
+        traceability=dict(
+            payload.get(
+                "traceability",
+                {},
+            )
+        ),
+        metadata=dict(
+            payload.get(
+                "metadata",
+                {},
+            )
+        ),
     )
 
 
@@ -113,5 +147,7 @@ class StructureCatalogGateway:
             "modifies_structure_catalog": False,
             "accesses_source_files": False,
             "accesses_intermediate_models": False,
+            "accesses_document_knowledge": False,
+            "semantic_knowledge_exposed": True,
             "required_fields": list(self.REQUIRED_FIELDS),
         }
