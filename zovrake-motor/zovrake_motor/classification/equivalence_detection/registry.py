@@ -10,6 +10,7 @@ from zovrake_motor.classification.equivalence_detection.detectors import (
     SharedOriginRelationDetector,
 )
 from zovrake_motor.classification.equivalence_detection.exceptions import EquivalenceDetectorNotFoundError
+from zovrake_motor.classification.equivalence_detection.semantic_detector import SemanticSimilarityRelationDetector
 from zovrake_motor.classification.equivalence_detection.port import EquivalenceDetectorPort
 from zovrake_motor.config.categories.classification import EquivalenceDetectionSettings
 
@@ -37,6 +38,10 @@ class EquivalenceDetectorRegistry:
             (settings.exact_match_detector_enabled, ExactNormalizedMatchDetector()),
             (settings.cross_type_distinct_detector_enabled, CrossTypeDistinctDetector()),
             (settings.shared_origin_relation_detector_enabled, SharedOriginRelationDetector()),
+            (
+                settings.semantic_similarity_enabled,
+                SemanticSimilarityRelationDetector(),
+            ),
         ]
         for enabled, detector in candidates:
             if enabled:

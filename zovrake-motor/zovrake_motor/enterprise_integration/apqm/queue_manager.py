@@ -441,25 +441,92 @@ class AsyncProcessingQueueManager:
         return self._store.active_count()
 
     @staticmethod
-    def _serialize_request(request: StartAnalysisRequest) -> dict[str, Any]:
+    def _serialize_request(
+        request: StartAnalysisRequest,
+    ) -> dict[str, Any]:
+        """
+        Serializa la solicitud completa que APQM debe conservar en cola.
+
+        Es crítico preservar ``document_references`` porque ahí viaja el
+        contenido real de cada documento del Centro de Evidencias, incluido
+        ``metadata.content_data_url``.
+
+        Sin este campo, la solicitud HTTP puede llegar correctamente a ECG,
+        pero al pasar por la cola asíncrona APQM solo quedarían
+        ``document_ids`` y el worker terminaría reconstruyendo referencias
+        vacías, provocando análisis sobre documentos sin contenido real.
+        """
         return {
-            "process_id": str(request.process_id),
+            "process_id": str(
+                request.process_id
+            ),
             "codigo_req": request.codigo_req,
             "contract_version": request.contract_version,
-            "document_ids": list(request.document_ids),
-            "metadata": dict(request.metadata),
+            "document_ids": list(
+                request.document_ids
+            ),
+            "document_references": [
+                dict(
+                    reference
+                )
+                for reference in request.document_references
+            ],
+            "analysis_scope": request.analysis_scope,
+            "metadata": dict(
+                request.metadata
+            ),
         }
 
     @staticmethod
-    def _deserialize_request(payload: dict[str, Any]) -> StartAnalysisRequest:
+    def _deserialize_request(
+        payload: dict[str, Any],
+    ) -> StartAnalysisRequest:
         from uuid import UUID as UuidType
 
+        raw_references = payload.get(
+            "document_references",
+            (),
+        )
+
+        document_references = tuple(
+            dict(
+                reference
+            )
+            for reference in raw_references
+            if isinstance(
+                reference,
+                dict,
+            )
+        )
+
         return StartAnalysisRequest(
-            process_id=UuidType(payload["process_id"]),
+            process_id=UuidType(
+                payload["process_id"]
+            ),
             codigo_req=payload["codigo_req"],
-            contract_version=payload.get("contract_version", "v1"),
-            document_ids=tuple(payload.get("document_ids", ())),
-            metadata=dict(payload.get("metadata", {})),
+            contract_version=payload.get(
+                "contract_version",
+                "v1",
+            ),
+            document_ids=tuple(
+                payload.get(
+                    "document_ids",
+                    (),
+                )
+            ),
+            document_references=document_references,
+            analysis_scope=str(
+                payload.get(
+                    "analysis_scope",
+                    "full",
+                )
+            ),
+            metadata=dict(
+                payload.get(
+                    "metadata",
+                    {},
+                )
+            ),
         )
 
     def snapshot(self) -> dict[str, Any]:

@@ -122,6 +122,10 @@ class EquivalenceDetectionSettings:
     # equivalencia por sí sola.
     semantic_similarity_enabled: bool = True
     semantic_similarity_related_threshold: float = 0.70
+    semantic_similarity_comparable_threshold: float = 0.52
+    semantic_similarity_equivalent_threshold: float = 0.85
+    semantic_similarity_min_shared_tokens: int = 1
+    semantic_similarity_max_comparisons: int = 50_000
     semantic_similarity_cross_document_only: bool = True
 
     comparable_group_builder_prepared: bool = True

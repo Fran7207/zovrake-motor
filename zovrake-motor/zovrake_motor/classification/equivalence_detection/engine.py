@@ -32,7 +32,7 @@ class EquivalenceDetectionEngine:
     Ningún otro componente detecta equivalencias directamente.
     """
 
-    EXPECTED_DETECTOR_COUNT = 3
+    EXPECTED_DETECTOR_COUNT = 4
 
     def __init__(
         self,
@@ -163,6 +163,13 @@ class EquivalenceDetectionEngine:
                 "exact_match_detector_enabled": settings.exact_match_detector_enabled,
                 "cross_type_distinct_detector_enabled": settings.cross_type_distinct_detector_enabled,
                 "shared_origin_relation_detector_enabled": settings.shared_origin_relation_detector_enabled,
+                "semantic_similarity_enabled": settings.semantic_similarity_enabled,
+                "semantic_similarity_related_threshold": settings.semantic_similarity_related_threshold,
+                "semantic_similarity_comparable_threshold": settings.semantic_similarity_comparable_threshold,
+                "semantic_similarity_equivalent_threshold": settings.semantic_similarity_equivalent_threshold,
+                "semantic_similarity_min_shared_tokens": settings.semantic_similarity_min_shared_tokens,
+                "semantic_similarity_max_comparisons": settings.semantic_similarity_max_comparisons,
+                "semantic_similarity_cross_document_only": settings.semantic_similarity_cross_document_only,
                 "comparable_group_builder_prepared": settings.comparable_group_builder_prepared,
                 "context_association_prepared": settings.context_association_prepared,
                 "comparative_domain_model_prepared": settings.comparative_domain_model_prepared,

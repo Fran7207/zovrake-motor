@@ -19,6 +19,7 @@ class EquivalenceRelationType(str, Enum):
     EQUIVALENT = "equivalent"
     DISTINCT = "distinct"
     RELATED = "related"
+    COMPARABLE = "comparable"
 
 
 class EvidenceLevel(str, Enum):
@@ -35,3 +36,4 @@ class EquivalenceDetectorType(str, Enum):
     EXACT_NORMALIZED_MATCH = "exact_normalized_match"
     CROSS_TYPE_DISTINCT = "cross_type_distinct"
     SHARED_ORIGIN_RELATION = "shared_origin_relation"
+    SEMANTIC_SIMILARITY = "semantic_similarity"

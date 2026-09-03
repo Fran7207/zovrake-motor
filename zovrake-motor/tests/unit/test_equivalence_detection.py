@@ -69,7 +69,7 @@ class TestEquivalenceDetectionEngine:
         engine.initialize()
 
         assert engine.is_ready()
-        assert engine.registry.count() == 3
+        assert engine.registry.count() == 4
 
     def test_detects_equivalence_relations(self):
         engine = EquivalenceDetectionEngine()
@@ -186,6 +186,8 @@ class TestEquivalenceDetectionEngine:
         assert settings.exact_match_detector_enabled is True
         assert settings.cross_type_distinct_detector_enabled is True
         assert settings.shared_origin_relation_detector_enabled is True
+        assert settings.semantic_similarity_enabled is True
+        assert settings.semantic_similarity_comparable_threshold == 0.52
 
 
 class TestEquivalenceDetectionIntegration:
@@ -204,7 +206,7 @@ class TestEquivalenceDetectionIntegration:
 
         assert service.equivalence_detection_engine is not None
         assert service.equivalence_detection_engine.catalog_store.count() == 1
-        assert result.detectors_executed == 3
+        assert result.detectors_executed == 4
 
     def test_pipeline_registers_equivalence_detection_as_fifth_functional_stage(self):
         service = ClassificationService()

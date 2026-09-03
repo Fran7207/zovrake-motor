@@ -103,6 +103,19 @@ _NON_ISSUER_CONTEXT_MARKERS = (
     "facturar a",
     "razón social del cliente",
     "razon social del cliente",
+    # Contextos que suelen identificar al beneficiario del pago,
+    # no al emisor de la cotización.
+    "depositar a nombre",
+    "depositar",
+    "cuentas recaudadoras",
+    "cuenta recaudadora",
+    "cuenta bancaria",
+    "cuentas bancarias",
+    "banco de credito",
+    "banco de crédito",
+    "cta cte",
+    "cta cte.",
+    "cci",
 )
 
 _CURRENCY_PATTERNS = (
@@ -342,7 +355,18 @@ def resolve_evidence_documents(
             )
         ).strip()
 
-        items = _extract_items(text)
+        # Primero usamos las tablas semánticas reconstruidas por
+        # PDFDocumentProcessor. Esta ruta puede recuperar correctamente las
+        # filas comerciales aunque la tabla física tenga solo encabezados o
+        # columnas fragmentadas.
+        items = _semantic_tables_to_items(
+            semantic_tables
+        )
+
+        # Si la semántica no produjo renglones comerciales, conservamos los
+        # extractores de texto existentes como fallback.
+        if not items:
+            items = _extract_items(text)
 
         if extracted_tables:
             tables = extracted_tables
@@ -351,6 +375,9 @@ def resolve_evidence_documents(
         else:
             tables = _extract_tables_from_text(text)
 
+        # El fallback de tablas físicas solo se utiliza cuando ninguna ruta
+        # anterior produjo ítems. Nunca debe sobreescribir una lista
+        # semántica correcta.
         if not items and tables:
             items = _tables_to_items(tables)
 
@@ -1742,6 +1769,235 @@ def _detect_payment_terms(text: str) -> str:
             return match.group(1).strip()[:200]
 
     return ""
+
+
+def _semantic_tables_to_items(
+    semantic_tables: tuple[dict[str, Any], ...],
+) -> tuple[dict[str, Any], ...]:
+    """
+    Proyecta exclusivamente tablas semánticas de líneas comerciales a ítems.
+
+    Esta ruta tiene prioridad sobre la tabla física porque un PDF puede
+    tener una representación física incompleta (por ejemplo, encabezados
+    separados en varias filas) mientras que el analizador semántico ya
+    reconstruyó correctamente las filas y columnas visibles.
+
+    No se convierten a ítems tablas de:
+    - banking;
+    - identity;
+    - conditions;
+    - observation;
+    - technical,
+    salvo que exista una estructura de líneas comerciales explícita.
+    """
+    result: list[dict[str, Any]] = []
+
+    preferred_description_keys = (
+        "description",
+        "product",
+        "producto",
+        "concept",
+        "concepto",
+        "detalle",
+        "material",
+        "service",
+        "servicio",
+    )
+
+    for table_index, table in enumerate(
+        semantic_tables
+    ):
+        if not isinstance(
+            table,
+            dict,
+        ):
+            continue
+
+        table_role = str(
+            table.get(
+                "table_role",
+                "",
+            )
+        ).strip().lower()
+
+        columns = table.get(
+            "columns",
+            (),
+        )
+
+        rows = table.get(
+            "rows",
+            (),
+        )
+
+        if not isinstance(
+            rows,
+            (list, tuple),
+        ):
+            continue
+
+        column_keys = {
+            str(
+                column.get(
+                    "key",
+                    "",
+                )
+            ).strip().lower()
+            for column in columns
+            if isinstance(
+                column,
+                dict,
+            )
+        }
+
+        # La detección de líneas comerciales se basa en la estructura real,
+        # no solamente en el texto del encabezado.
+        has_description = bool(
+            column_keys.intersection(
+                preferred_description_keys
+            )
+        )
+        has_quantity = "quantity" in column_keys
+        has_unit_price = "unit_price" in column_keys
+        has_unit = "unit" in column_keys
+        has_total = "total" in column_keys
+
+        if table_role and table_role != "commercial_items":
+            if not (
+                has_description
+                and (
+                    has_quantity
+                    or has_unit_price
+                    or has_total
+                )
+            ):
+                continue
+
+        if not has_description:
+            continue
+
+        table_id = str(
+            table.get(
+                "table_id",
+                f"semantic-table-{table_index + 1}",
+            )
+        ).strip()
+
+        if not table_id:
+            table_id = (
+                f"semantic-table-{table_index + 1}"
+            )
+
+        for row_index, row in enumerate(
+            rows
+        ):
+            if not isinstance(
+                row,
+                dict,
+            ):
+                continue
+
+            fields = {
+                str(key).strip(): value
+                for key, value in row.items()
+                if str(key).strip()
+            }
+
+            if not fields:
+                continue
+
+            description = ""
+            for key in preferred_description_keys:
+                value = fields.get(key)
+
+                if (
+                    value is not None
+                    and str(value).strip()
+                ):
+                    description = str(
+                        value
+                    ).strip()
+                    break
+
+            quantity = str(
+                fields.get(
+                    "quantity",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            unit = str(
+                fields.get(
+                    "unit",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            unit_price = str(
+                fields.get(
+                    "unit_price",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            total = str(
+                fields.get(
+                    "total",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            # Un renglón comercial debe tener descripción y al menos una
+            # señal de cantidad/precio/total. Esto evita transformar tablas
+            # de identidad o condiciones en "productos".
+            if not description:
+                continue
+
+            if not (
+                quantity
+                or unit_price
+                or total
+                or unit
+            ):
+                continue
+
+            result.append(
+                {
+                    "item_id": (
+                        f"{table_id}"
+                        f"-row-{row_index}"
+                    ),
+                    "description": description,
+                    "quantity": quantity,
+                    "unit_price": unit_price,
+                    "unit": unit,
+                    "fields": fields,
+                    "source_kind": "semantic_table",
+                    "source_table_id": table_id,
+                    "source_page_number": table.get(
+                        "source_page_number"
+                    ),
+                    "source_evidence": list(
+                        table.get(
+                            "evidence",
+                            (),
+                        )
+                        or ()
+                    ),
+                    "semantic_table_confidence": table.get(
+                        "confidence",
+                        0.0,
+                    ),
+                }
+            )
+
+    return tuple(
+        result
+    )
 
 
 def _extract_items(

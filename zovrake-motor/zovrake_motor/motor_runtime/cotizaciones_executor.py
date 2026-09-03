@@ -1321,6 +1321,46 @@ class CotizacionesAnalysisExecutor:
         prepared_catalog["equivalence_detection_prepared"] = True
         prepared_catalog["cross_document_only"] = True
 
+        equivalence_settings = (
+            self._classification
+            ._config_provider.classification()
+            .equivalence_detection
+            if getattr(self._classification, "_config_provider", None) is not None
+            else None
+        )
+
+        if equivalence_settings is not None:
+            prepared_catalog[
+                "semantic_similarity_enabled"
+            ] = bool(
+                equivalence_settings.semantic_similarity_enabled
+            )
+            prepared_catalog[
+                "semantic_similarity_comparable_threshold"
+            ] = float(
+                equivalence_settings.semantic_similarity_comparable_threshold
+            )
+            prepared_catalog[
+                "semantic_similarity_equivalent_threshold"
+            ] = float(
+                equivalence_settings.semantic_similarity_equivalent_threshold
+            )
+            prepared_catalog[
+                "semantic_similarity_min_shared_tokens"
+            ] = int(
+                equivalence_settings.semantic_similarity_min_shared_tokens
+            )
+            prepared_catalog[
+                "semantic_similarity_max_comparisons"
+            ] = int(
+                equivalence_settings.semantic_similarity_max_comparisons
+            )
+            prepared_catalog[
+                "semantic_similarity_cross_document_only"
+            ] = bool(
+                equivalence_settings.semantic_similarity_cross_document_only
+            )
+
         result = self._classification.detect_equivalences(
             EquivalenceDetectionRequest(
                 process_id=process_id,

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from zovrake_motor.classification.equivalence_detection.enums import EquivalenceRelationType
+
 from zovrake_motor.classification.comparable_group_builder.enums import (
     ComparableGroupBuildStatus,
     ComparableGroupType,
@@ -210,14 +212,16 @@ def build_clusters_from_equivalences(
     catalog_view: EquivalenceCatalogView,
 ) -> dict[str, tuple[str, ...]]:
     nodes: set[str] = set()
-    for relation in catalog_view.equivalent_relations:
+    relations = catalog_view.comparable_relations
+
+    for relation in relations:
         nodes.update(relation.involved_concept_ids)
 
     if not nodes:
         return {}
 
     union_find = _UnionFind(tuple(nodes))
-    for relation in catalog_view.equivalent_relations:
+    for relation in relations:
         if len(relation.involved_concept_ids) >= 2:
             left, right = relation.involved_concept_ids[0], relation.involved_concept_ids[1]
             union_find.union(left, right)
@@ -326,6 +330,26 @@ def build_comparable_group_record(
             "semantic_facts": semantic_provenance[
                 "facts"
             ],
+            "relation_types": sorted(
+                {
+                    str(relation.relation_type)
+                    for relation in relations
+                }
+            ),
+            "semantic_similarity_scores": [
+                float(relation.metadata.get("semantic_similarity_score", 0.0))
+                for relation in relations
+                if "semantic_similarity_score" in relation.metadata
+            ],
+            "comparable_candidate": any(
+                relation.relation_type
+                == EquivalenceRelationType.COMPARABLE.value
+                or relation.metadata.get(
+                    "semantic_comparable_candidate",
+                    False,
+                )
+                for relation in relations
+            ),
         },
     )
 

@@ -27,6 +27,7 @@ class EquivalenceCatalogView:
     source_normalized_catalog_id: str
     equivalences: tuple[EquivalenceRecord, ...]
     equivalent_relations: tuple[EquivalenceRecord, ...]
+    comparable_relations: tuple[EquivalenceRecord, ...]
     raw_catalog: dict[str, Any]
     document_ids: tuple[str, ...] = ()
 
@@ -103,6 +104,21 @@ class EquivalenceCatalogGateway:
             for equivalence in equivalences
             if equivalence.relation_type == EquivalenceRelationType.EQUIVALENT.value
         )
+        comparable_relations = tuple(
+            equivalence
+            for equivalence in equivalences
+            if equivalence.relation_type
+            in {
+                EquivalenceRelationType.EQUIVALENT.value,
+                EquivalenceRelationType.COMPARABLE.value,
+            }
+            and bool(
+                equivalence.metadata.get(
+                    "semantic_comparable_candidate",
+                    equivalence.relation_type == EquivalenceRelationType.EQUIVALENT.value,
+                )
+            )
+        )
 
         catalog = EquivalenceCatalog(
             catalog_id=str(catalog_dict["catalog_id"]),
@@ -122,6 +138,7 @@ class EquivalenceCatalogGateway:
             source_normalized_catalog_id=catalog.source_normalized_catalog_id,
             equivalences=equivalences,
             equivalent_relations=equivalent_relations,
+            comparable_relations=comparable_relations,
             raw_catalog=catalog_dict,
             document_ids=tuple(catalog_dict.get("document_ids", []))
             or tuple(
