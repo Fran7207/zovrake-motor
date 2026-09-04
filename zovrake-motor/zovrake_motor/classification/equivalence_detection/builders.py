@@ -277,6 +277,35 @@ def _semantic_provenance(
     }
 
 
+def _concept_source_provenance(
+    concepts: tuple[NormalizedConceptRecord, ...],
+) -> dict[str, dict[str, Any]]:
+    """Preserva la correspondencia concepto normalizado -> fuente/ítem."""
+    result: dict[str, dict[str, Any]] = {}
+
+    for concept in concepts:
+        metadata = concept.metadata if isinstance(concept.metadata, dict) else {}
+        fields = metadata.get("fields", {})
+        if not isinstance(fields, dict):
+            fields = {}
+
+        result[str(concept.normalized_concept_id)] = {
+            "concept_id": str(concept.concept_id),
+            "document_id": str(concept.traceability.document_id),
+            "document_reference": str(concept.traceability.document_reference),
+            "source_record_id": str(concept.model_reference.source_record_id),
+            "original_value": str(concept.original_value),
+            "normalized_value": str(concept.normalized_value),
+            "item_id": str(metadata.get("item_id", "") or ""),
+            "quantity": metadata.get("quantity", ""),
+            "unit": metadata.get("unit", ""),
+            "unit_price": metadata.get("unit_price", ""),
+            "fields": dict(fields),
+        }
+
+    return result
+
+
 def build_equivalence_record(
     *,
     catalog_view: NormalizedConceptCatalogView,
@@ -316,6 +345,9 @@ def build_equivalence_record(
             "facts"
         ],
         "semantic_concept_count": len(
+            concepts
+        ),
+        "concept_source_map": _concept_source_provenance(
             concepts
         ),
     }

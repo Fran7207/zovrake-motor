@@ -26,6 +26,28 @@ MATERIAL_CONCEPT_TYPES = frozenset({"material", "partida"})
 SERVICE_CONCEPT_TYPES = frozenset({"service", "technical_element", "commercial_element", "observation"})
 
 
+def _concept_source_map_from_relations(
+    relations: tuple[EquivalenceRecord, ...],
+) -> dict[str, dict[str, Any]]:
+    """Consolida la fonte documental de cada concepto del grupo."""
+    result: dict[str, dict[str, Any]] = {}
+
+    for relation in relations:
+        raw_map = relation.metadata.get("concept_source_map", {})
+        if not isinstance(raw_map, dict):
+            continue
+
+        for concept_id, source in raw_map.items():
+            normalized_id = str(concept_id).strip()
+            if not normalized_id or not isinstance(source, dict):
+                continue
+            existing = result.get(normalized_id)
+            if existing is None or (not str(existing.get("document_id", "")).strip() and str(source.get("document_id", "")).strip()):
+                result[normalized_id] = dict(source)
+
+    return result
+
+
 def _semantic_group_provenance(
     relations: tuple[EquivalenceRecord, ...],
 ) -> dict[str, Any]:
@@ -265,6 +287,9 @@ def build_comparable_group_record(
     semantic_provenance = _semantic_group_provenance(
         relations
     )
+    concept_source_map = _concept_source_map_from_relations(
+        relations
+    )
 
     return ComparableGroupRecord(
         group_id=public_group_id,
@@ -350,6 +375,7 @@ def build_comparable_group_record(
                 )
                 for relation in relations
             ),
+            "concept_source_map": concept_source_map,
         },
     )
 

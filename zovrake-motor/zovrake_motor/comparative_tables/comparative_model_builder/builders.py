@@ -315,6 +315,20 @@ def build_definitive_model(
     semantic_knowledge = _extract_semantic_knowledge(
         structure
     )
+
+    concept_source_map: dict[str, dict[str, Any]] = {}
+    if structure is not None:
+        raw_concept_source_map = structure.metadata_prepared.get(
+            "concept_source_map",
+            {},
+        )
+        if isinstance(raw_concept_source_map, dict):
+            concept_source_map = {
+                str(key): dict(value)
+                for key, value in raw_concept_source_map.items()
+                if isinstance(value, dict)
+            }
+
     provider_semantic_knowledge = (
         _extract_provider_semantic_knowledge(
             rows
@@ -373,6 +387,7 @@ def build_definitive_model(
         "provider_semantic_knowledge": list(
             provider_semantic_knowledge
         ),
+        "concept_source_map": concept_source_map,
     }
 
     motor_refs = {

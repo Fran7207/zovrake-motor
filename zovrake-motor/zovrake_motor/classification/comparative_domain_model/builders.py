@@ -170,6 +170,13 @@ def build_comparative_domain_model_record(
         group
     )
 
+    raw_group_metadata = group.get("metadata", {})
+    if not isinstance(raw_group_metadata, dict):
+        raw_group_metadata = {}
+    concept_source_map = raw_group_metadata.get("concept_source_map", {})
+    if not isinstance(concept_source_map, dict):
+        concept_source_map = {}
+
     return ComparativeDomainModelRecord(
         comparative_model_id=public_model_id,
         internal_model_id=build_internal_model_id(
@@ -329,6 +336,11 @@ def build_comparative_domain_model_record(
                 "comparable_group_builder"
             ),
             "semantic_knowledge_preserved": True,
+            "concept_source_map": {
+                str(key): dict(value)
+                for key, value in concept_source_map.items()
+                if isinstance(value, dict)
+            },
         },
     )
 

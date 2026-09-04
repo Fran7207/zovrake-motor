@@ -2351,6 +2351,12 @@ class CotizacionesAnalysisExecutor:
                 if document is None and len(provider_candidates) == 1:
                     document = provider_candidates[0]
 
+                source_item = CotizacionesAnalysisExecutor._resolve_row_source_item(
+                    model=model,
+                    row=row,
+                    provider_documents=provider_candidates,
+                )
+
                 cells = []
 
                 for cell in row.get("cells_reserved", []):
@@ -2365,6 +2371,7 @@ class CotizacionesAnalysisExecutor:
                         attribute=attr,
                         document=document,
                         provider_id=provider_id,
+                        item=source_item,
                     )
 
                     if value:
@@ -2396,6 +2403,28 @@ class CotizacionesAnalysisExecutor:
                     document is None
                     and len(provider_candidates) > 1
                 )
+
+                if source_item is not None:
+                    metadata["source_item_id"] = str(
+                        source_item.get("item_id", "")
+                    )
+                    metadata["source_item_description"] = str(
+                        source_item.get("description", "")
+                    )
+                    metadata["source_item_resolution"] = {
+                        "resolved": True,
+                        "method": str(
+                            source_item.get(
+                                "_resolution_method",
+                                "concept_source_map",
+                            )
+                        ),
+                    }
+                else:
+                    metadata["source_item_resolution"] = {
+                        "resolved": False,
+                        "method": "unresolved",
+                    }
 
                 if document is not None:
                     metadata["provider_name"] = (
@@ -2492,30 +2521,249 @@ class CotizacionesAnalysisExecutor:
 
 
     @staticmethod
+    def _resolve_row_source_item(
+        *,
+        model: dict[str, Any],
+        row: dict[str, Any],
+        provider_documents: list[ResolvedDocumentContent],
+    ) -> dict[str, Any] | None:
+        """
+        Resuelve el ítem exacto que origina una fila/proveedor.
+
+        La resolución usa primero ``concept_source_map`` producido por EDE y
+        transportado hasta PM6. Solamente acepta una fuente cuando su
+        document_id pertenece al conjunto documental real de la fila.
+
+        Esto elimina la antigua regla incorrecta: ``document.items[0]``.
+        """
+        metadata = model.get("metadata", {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+
+        concept_source_map = metadata.get(
+            "concept_source_map",
+            {},
+        )
+        if not isinstance(concept_source_map, dict):
+            concept_source_map = {}
+
+        provider_document_ids = {
+            str(document.document_id).strip()
+            for document in provider_documents
+            if str(document.document_id).strip()
+        }
+
+        if not provider_document_ids:
+            raw_ids = row.get(
+                "metadata",
+                {},
+            )
+            if isinstance(raw_ids, dict):
+                provider_document_ids.update(
+                    str(value).strip()
+                    for value in raw_ids.get(
+                        "provider_source_document_ids",
+                        [],
+                    )
+                    if str(value).strip()
+                )
+
+        candidates: list[tuple[dict[str, Any], dict[str, Any]]] = []
+
+        for concept_id, source in concept_source_map.items():
+            if not isinstance(source, dict):
+                continue
+
+            source_document_id = str(
+                source.get("document_id", "")
+            ).strip()
+
+            if (
+                provider_document_ids
+                and source_document_id
+                and source_document_id not in provider_document_ids
+            ):
+                continue
+
+            source_payload = dict(source)
+            source_payload["_resolution_method"] = "concept_source_map"
+            candidates.append(
+                (
+                    source_payload,
+                    {
+                        "concept_id": str(concept_id),
+                        "document_id": source_document_id,
+                    },
+                )
+            )
+
+        if not candidates:
+            return None
+
+        # Un proveedor normalmente aporta una sola línea al grupo. Si hay
+        # varias coincidencias, conservamos la ambigüedad y no escogemos
+        # arbitrariamente la primera.
+        unique_item_ids = {
+            str(source.get("item_id", "")).strip()
+            for source, _ in candidates
+            if str(source.get("item_id", "")).strip()
+        }
+
+        if len(candidates) == 1:
+            source = candidates[0][0]
+        elif len(unique_item_ids) == 1:
+            target_item_id = next(iter(unique_item_ids))
+            source = next(
+                source
+                for source, _ in candidates
+                if str(source.get("item_id", "")).strip()
+                == target_item_id
+            )
+        else:
+            return None
+
+        source_item_id = str(
+            source.get("item_id", "")
+        ).strip()
+        target_document_id = str(
+            source.get("document_id", "")
+        ).strip()
+
+        matching_documents = [
+            document
+            for document in provider_documents
+            if not target_document_id
+            or str(document.document_id).strip()
+            == target_document_id
+        ]
+
+        if len(matching_documents) != 1:
+            return None
+
+        document = matching_documents[0]
+        items = tuple(
+            item
+            for item in document.items
+            if isinstance(item, dict)
+        )
+
+        if source_item_id:
+            matches = [
+                item
+                for item in items
+                if str(item.get("item_id", "")).strip()
+                == source_item_id
+            ]
+            if len(matches) == 1:
+                resolved = dict(matches[0])
+                resolved.setdefault(
+                    "fields",
+                    dict(source.get("fields", {}))
+                    if isinstance(source.get("fields", {}), dict)
+                    else {},
+                )
+                resolved["_resolution_method"] = str(
+                    source.get(
+                        "_resolution_method",
+                        "concept_source_map",
+                    )
+                )
+                return resolved
+
+        source_description = str(
+            source.get("original_value", "")
+            or source.get("normalized_value", "")
+        ).strip().casefold()
+
+        if source_description:
+            matches = [
+                item
+                for item in items
+                if str(
+                    item.get("description", "")
+                ).strip().casefold()
+                == source_description
+            ]
+            if len(matches) == 1:
+                resolved = dict(matches[0])
+                resolved["_resolution_method"] = "concept_source_map_description"
+                return resolved
+
+        return None
+
+    @staticmethod
     def _resolve_cell_value(
         *,
         attribute: str,
         document: ResolvedDocumentContent | None,
         provider_id: str,
+        item: dict[str, Any] | None = None,
     ) -> str:
         if attribute in {"provider", "proveedor", "provider_name"}:
-            return (document.provider_name if document else provider_id) or provider_id
+            return (
+                document.provider_name
+                if document
+                else provider_id
+            ) or provider_id
+
         if document is None:
             return ""
+
         if attribute in {"currency", "moneda"}:
             return document.commercial_currency
+
         if attribute in {"total", "total_amount", "monto", "importe"}:
             return document.commercial_total_amount
+
         if attribute in {"payment_terms", "pago", "condiciones"}:
             return document.commercial_payment_terms
-        if attribute in {"quantity", "cantidad"} and document.items:
-            return str(document.items[0].get("quantity", ""))
-        if attribute in {"unit_price", "precio", "precio_unitario"} and document.items:
-            return str(document.items[0].get("unit_price", ""))
-        if attribute in {"description", "descripcion", "item"} and document.items:
-            return str(document.items[0].get("description", ""))
+
         if attribute in {"document", "documento", "file_name"}:
             return document.file_name or document.document_label
+
+        if item is not None:
+            normalized_attribute = str(attribute).strip().casefold()
+            direct_aliases = {
+                "quantity": "quantity",
+                "cantidad": "quantity",
+                "unit": "unit",
+                "unidad": "unit",
+                "unit_price": "unit_price",
+                "precio": "unit_price",
+                "precio_unitario": "unit_price",
+                "description": "description",
+                "descripcion": "description",
+                "item": "description",
+            }
+
+            item_key = direct_aliases.get(
+                normalized_attribute
+            )
+
+            if item_key is not None:
+                value = item.get(
+                    item_key,
+                    "",
+                )
+                if value not in (None, ""):
+                    return str(value)
+
+            fields = item.get(
+                "fields",
+                {},
+            )
+            if isinstance(fields, dict):
+                normalized_fields = {
+                    str(key).strip().casefold(): value
+                    for key, value in fields.items()
+                }
+                value = normalized_fields.get(
+                    normalized_attribute,
+                    "",
+                )
+                if value not in (None, ""):
+                    return str(value)
+
         return ""
 
     @staticmethod

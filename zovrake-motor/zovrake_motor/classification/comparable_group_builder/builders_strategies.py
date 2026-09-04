@@ -19,7 +19,7 @@ class EquivalenceClusterGroupBuilder(ComparableGroupBuilderPort):
     """
     Construye grupos comparables agrupando conceptos equivalentes.
 
-    Utiliza únicamente relaciones de tipo equivalent del Modelo de Equivalencias.
+    Utiliza relaciones de tipo equivalent o comparable del Modelo de Equivalencias.
     """
 
     @property
@@ -46,7 +46,7 @@ class EquivalenceClusterGroupBuilder(ComparableGroupBuilderPort):
         sequence = start_sequence
 
         relations_by_concept: dict[str, list[EquivalenceRecord]] = {}
-        for relation in catalog_view.equivalent_relations:
+        for relation in catalog_view.comparable_relations:
             for concept_id in relation.involved_concept_ids:
                 relations_by_concept.setdefault(concept_id, []).append(relation)
 
@@ -83,6 +83,6 @@ class EquivalenceClusterGroupBuilder(ComparableGroupBuilderPort):
             technical_observations=(
                 f"builder_type={self.builder_type.value}",
                 f"groups_built={len(groups)}",
-                f"equivalent_relations_used={len(catalog_view.equivalent_relations)}",
+                f"comparable_relations_used={len(catalog_view.comparable_relations)}",
             ),
         )

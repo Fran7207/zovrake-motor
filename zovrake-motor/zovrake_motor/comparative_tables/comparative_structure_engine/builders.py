@@ -75,6 +75,13 @@ def build_comparative_table_base_structure(
     if not isinstance(semantic_knowledge, dict):
         semantic_knowledge = {}
 
+    concept_source_map = group_metadata.get(
+        "concept_source_map",
+        {},
+    )
+    if not isinstance(concept_source_map, dict):
+        concept_source_map = {}
+
     semantic_fact_ids = semantic_knowledge.get(
         "semantic_fact_ids",
         (),
@@ -138,6 +145,11 @@ def build_comparative_table_base_structure(
             "semantic_facts": list(semantic_facts)
             if isinstance(semantic_facts, (list, tuple))
             else [],
+            "concept_source_map": {
+                str(key): dict(value)
+                for key, value in concept_source_map.items()
+                if isinstance(value, dict)
+            },
         },
         metadata={
             "table_id_prefix": settings.structure_id_prefix,
