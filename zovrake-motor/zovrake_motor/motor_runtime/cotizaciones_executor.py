@@ -2767,48 +2767,351 @@ class CotizacionesAnalysisExecutor:
         return ""
 
     @staticmethod
+    def _resolve_matrix_provider_name(
+        *,
+        row: dict[str, Any],
+        documents: tuple[ResolvedDocumentContent, ...],
+        provider_source_map: Any,
+    ) -> str:
+        """Resuelve el nombre visible del proveedor sin usar IDs internos como nombre."""
+        row_metadata = row.get("metadata", {})
+        if not isinstance(row_metadata, dict):
+            row_metadata = {}
+
+        for key in ("provider_name", "provider_display_name"):
+            value = str(row_metadata.get(key, "")).strip()
+            if value:
+                return value
+
+        provider_id = str(row.get("provider_id", "")).strip()
+
+        if isinstance(provider_source_map, list):
+            for entry in provider_source_map:
+                if not isinstance(entry, dict):
+                    continue
+                if str(entry.get("provider_id", "")).strip() != provider_id:
+                    continue
+                provider_name = str(entry.get("provider_name", "")).strip()
+                if provider_name:
+                    return provider_name
+
+        for document in documents:
+            if str(document.document_id).strip() == provider_id:
+                provider_name = str(document.provider_name).strip()
+                if provider_name:
+                    return provider_name
+
+        if provider_id and not provider_id.startswith("cotdoc-"):
+            return provider_id
+
+        return "Proveedor no identificado"
+
+    @staticmethod
+    def _matrix_provider_identity(
+        *,
+        row: dict[str, Any],
+        provider_name: str,
+    ) -> str:
+        """Identidad estable para contar proveedores en una matriz."""
+        normalized_name = " ".join(provider_name.casefold().split())
+        if normalized_name and normalized_name != "proveedor no identificado":
+            return normalized_name
+        return " ".join(str(row.get("provider_id", "")).casefold().split())
+
+    @staticmethod
     def _enrich_comparative_payload(
         *,
         definitive_catalog: dict[str, Any],
         documents: tuple[ResolvedDocumentContent, ...],
     ) -> dict[str, Any]:
-        matrices = []
+        """
+        Proyecta PM6 a una matriz comparativa dinámica por grupo.
+
+        Las columnas vienen del Dynamic Column Builder. Las filas conservan
+        el proveedor y el ítem fuente exacto resuelto previamente por PM6.
+        Se mantiene compatibilidad con ``header`` y ``values`` para clientes
+        existentes, pero se añade una representación semántica completa por
+        celda.
+        """
+        matrices: list[dict[str, Any]] = []
+        pending_groups: list[dict[str, Any]] = []
+
+        source_documents_by_id = {
+            str(document.document_id).strip(): document
+            for document in documents
+            if str(document.document_id).strip()
+        }
+
         for model in definitive_catalog.get("models", []):
-            columns = list(model.get("dynamic_columns", []))
-            rows = list(model.get("dynamic_rows", []))
-            header = [
-                str(col.get("display_name") or col.get("attribute_name") or col.get("column_id") or "")
-                for col in columns
+            columns = [
+                dict(column)
+                for column in model.get("dynamic_columns", [])
+                if isinstance(column, dict)
             ]
-            body = []
-            for row in rows:
-                cells_by_col = {
-                    str(cell.get("column_id")): cell
-                    for cell in row.get("cells_reserved", [])
-                }
-                values = []
-                for col in columns:
-                    cell = cells_by_col.get(str(col.get("column_id")), {})
-                    values.append(str(cell.get("value") or ""))
-                body.append(
+            rows = [
+                dict(row)
+                for row in model.get("dynamic_rows", [])
+                if isinstance(row, dict)
+            ]
+
+            model_metadata = model.get("metadata", {})
+            if not isinstance(model_metadata, dict):
+                model_metadata = {}
+
+            provider_source_map = model_metadata.get(
+                "provider_source_map",
+                [],
+            )
+            if not isinstance(provider_source_map, list):
+                provider_source_map = []
+
+            column_descriptors = []
+            for column in columns:
+                traceability = column.get("traceability", {})
+                if not isinstance(traceability, dict):
+                    traceability = {}
+
+                display_name = str(
+                    column.get("display_name")
+                    or column.get("attribute_name")
+                    or column.get("column_id")
+                    or ""
+                )
+                column_descriptors.append(
                     {
-                        "provider_id": row.get("provider_id", ""),
-                        "row_id": row.get("row_id", ""),
-                        "values": values,
-                        "metadata": dict(row.get("metadata", {})),
+                        "column_id": str(column.get("column_id", "")),
+                        "attribute_name": str(
+                            column.get("attribute_name", "")
+                        ),
+                        "display_name": display_name,
+                        "data_type": str(column.get("data_type", "")),
+                        "attribute_source": str(
+                            traceability.get(
+                                "attribute_source",
+                                "",
+                            )
+                        ),
+                        "logical_position": column.get(
+                            "logical_position"
+                        ),
                     }
                 )
-            matrices.append(
-                {
-                    "comparative_table_id": model.get("comparative_table_id", ""),
-                    "group_id": model.get("group_id", ""),
-                    "group_type": model.get("group_type", ""),
-                    "header": header,
-                    "rows": body,
-                    "commercial_information": model.get("commercial_information", {}),
-                    "technical_information": model.get("technical_information", {}),
+
+            body: list[dict[str, Any]] = []
+            provider_identities: set[str] = set()
+            resolved_item_count = 0
+
+            for row in rows:
+                provider_name = CotizacionesAnalysisExecutor._resolve_matrix_provider_name(
+                    row=row,
+                    documents=documents,
+                    provider_source_map=provider_source_map,
+                )
+                provider_identity = CotizacionesAnalysisExecutor._matrix_provider_identity(
+                    row=row,
+                    provider_name=provider_name,
+                )
+                if provider_identity:
+                    provider_identities.add(provider_identity)
+
+                row_metadata = row.get("metadata", {})
+                if not isinstance(row_metadata, dict):
+                    row_metadata = {}
+
+                source_document_ids = [
+                    str(value).strip()
+                    for value in row_metadata.get(
+                        "provider_source_document_ids",
+                        [],
+                    )
+                    if str(value).strip()
+                ]
+
+                source_item_id = str(
+                    row_metadata.get(
+                        "source_item_id",
+                        "",
+                    )
+                ).strip()
+
+                source_item = None
+                source_document_id = ""
+
+                for document_id in source_document_ids:
+                    document = source_documents_by_id.get(document_id)
+                    if document is None:
+                        continue
+
+                    for candidate in document.items:
+                        if not isinstance(candidate, dict):
+                            continue
+                        if source_item_id and str(
+                            candidate.get("item_id", "")
+                        ).strip() == source_item_id:
+                            source_item = dict(candidate)
+                            source_document_id = document_id
+                            break
+
+                    if source_item is not None:
+                        break
+
+                if source_item is not None:
+                    resolved_item_count += 1
+
+                cells_by_col = {
+                    str(cell.get("column_id", "")): cell
+                    for cell in row.get("cells_reserved", [])
+                    if isinstance(cell, dict)
                 }
+
+                cells: list[dict[str, Any]] = []
+                values: list[str] = []
+
+                for descriptor in column_descriptors:
+                    column_id = descriptor["column_id"]
+                    cell = cells_by_col.get(column_id, {})
+                    value = str(cell.get("value") or "")
+                    values.append(value)
+                    cells.append(
+                        {
+                            **descriptor,
+                            "value": value,
+                            "value_present": bool(value),
+                            "value_prepared": bool(
+                                cell.get(
+                                    "value_prepared",
+                                    False,
+                                )
+                            ),
+                        }
+                    )
+
+                source_document_name = ""
+                if source_document_id:
+                    source_document = source_documents_by_id.get(
+                        source_document_id
+                    )
+                    if source_document is not None:
+                        source_document_name = str(
+                            source_document.file_name
+                            or source_document.document_label
+                            or source_document_id
+                        )
+
+                body.append(
+                    {
+                        "provider_id": str(
+                            row.get(
+                                "provider_id",
+                                "",
+                            )
+                        ),
+                        "provider_name": provider_name,
+                        "row_id": str(
+                            row.get(
+                                "row_id",
+                                "",
+                            )
+                        ),
+                        "document_ids": source_document_ids,
+                        "document_name": source_document_name,
+                        "source_item_id": source_item_id,
+                        "source_item": source_item,
+                        "values": values,
+                        "cells": cells,
+                        "metadata": row_metadata,
+                    }
+                )
+
+            provider_count = len(provider_identities)
+            source_bindings_complete = bool(body) and (
+                resolved_item_count == len(body)
             )
+
+            comparison_ready = (
+                provider_count >= 2
+                and source_bindings_complete
+            )
+
+            if comparison_ready:
+                comparison_status = "ready"
+            elif provider_count < 2:
+                comparison_status = "pending_single_provider"
+            else:
+                comparison_status = "incomplete_source_binding"
+
+            matrix = {
+                "comparative_table_id": str(
+                    model.get(
+                        "comparative_table_id",
+                        "",
+                    )
+                ),
+                "definitive_model_id": str(
+                    model.get(
+                        "definitive_model_id",
+                        "",
+                    )
+                ),
+                "group_id": str(
+                    model.get(
+                        "group_id",
+                        "",
+                    )
+                ),
+                "group_type": str(
+                    model.get(
+                        "group_type",
+                        "",
+                    )
+                ),
+                "comparison_status": comparison_status,
+                "comparison_ready": comparison_ready,
+                "provider_count": provider_count,
+                "resolved_item_count": resolved_item_count,
+                "source_bindings_complete": source_bindings_complete,
+                "header": [
+                    descriptor["display_name"]
+                    for descriptor in column_descriptors
+                ],
+                "columns": column_descriptors,
+                "rows": body,
+                "commercial_information": model.get(
+                    "commercial_information",
+                    {},
+                ),
+                "technical_information": model.get(
+                    "technical_information",
+                    {},
+                ),
+                "semantic_knowledge": model_metadata.get(
+                    "semantic_knowledge",
+                    {},
+                ),
+                "traceability": model.get(
+                    "traceability",
+                    {},
+                ),
+                "source_document_ids": list(
+                    model.get(
+                        "document_ids",
+                        [],
+                    )
+                    or []
+                ),
+                "source_data_preserved": bool(
+                    model.get(
+                        "source_data_preserved",
+                        True,
+                    )
+                ),
+            }
+
+            if comparison_ready:
+                matrices.append(matrix)
+            else:
+                pending_groups.append(matrix)
+
         return {
             "catalog_id": definitive_catalog.get("catalog_id", ""),
             "document_id": definitive_catalog.get("document_id", ""),
@@ -2817,8 +3120,13 @@ class CotizacionesAnalysisExecutor:
                 "pm6_definitive_output_contract",
                 True,
             ),
+            "comparison_engine_version": "zo-037-matrix-1.0",
+            "comparison_ready": bool(matrices),
+            "comparison_count": len(matrices),
+            "pending_group_count": len(pending_groups),
             "models": definitive_catalog.get("models", []),
             "matrices": matrices,
+            "pending_groups": pending_groups,
             "providers": [
                 {
                     "provider_name": doc.provider_name,
@@ -2831,4 +3139,5 @@ class CotizacionesAnalysisExecutor:
                 }
                 for doc in documents
             ],
+            "source_documents_count": len(documents),
         }
