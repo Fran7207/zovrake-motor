@@ -311,3 +311,57 @@ class TestDynamicColumnBuilderIntegration:
         if total_columns > 1:
             assert total_columns == 1
             assert any(incident.severity == "warning" for incident in result.incidents)
+
+
+def test_extracts_union_of_source_item_attributes():
+    from zovrake_motor.comparative_tables.dynamic_column_builder.builders import (
+        extract_attribute_candidates,
+    )
+
+    candidates = extract_attribute_candidates(
+        {"commercial": {}},
+        {},
+        {
+            "c1": {
+                "description": "Cemento Portland Tipo I",
+                "quantity": "100",
+                "unit": "BLS",
+                "unit_price": "32.00",
+                "fields": {"marca": "A", "presentacion": "42.5 KG"},
+            },
+            "c2": {
+                "description": "Cemento Portland Tipo I",
+                "quantity": "120",
+                "unit": "BLS",
+                "unit_price": "30.00",
+                "fields": {"marca": "B", "certificado": "ISO"},
+            },
+        },
+    )
+
+    names = [name.casefold() for name, *_ in candidates]
+    assert "descripción" in names
+    assert "cantidad" in names
+    assert "unidad" in names
+    assert "precio unitario" in names
+    assert "marca" in names
+    assert "presentacion" in names
+    assert "certificado" in names
+
+
+def test_does_not_override_existing_structured_attributes():
+    from zovrake_motor.comparative_tables.dynamic_column_builder.builders import (
+        extract_attribute_candidates,
+    )
+
+    candidates = extract_attribute_candidates(
+        {"commercial": {"Cantidad": "100"}},
+        {},
+        {
+            "c1": {"quantity": "100", "fields": {"marca": "A"}},
+        },
+    )
+
+    normalized = [name.casefold() for name, *_ in candidates]
+    assert normalized.count("cantidad") == 1
+    assert "marca" in normalized

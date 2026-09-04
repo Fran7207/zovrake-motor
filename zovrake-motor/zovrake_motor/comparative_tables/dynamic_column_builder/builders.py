@@ -124,6 +124,7 @@ def _semantic_fact_column_candidate(
 def extract_attribute_candidates(
     available_attributes: dict[str, Any],
     semantic_knowledge: dict[str, Any] | None = None,
+    concept_source_map: dict[str, Any] | None = None,
 ) -> list[tuple[str, str, ColumnDataType, Any]]:
     """
     Extrae candidatos de columnas desde dos fuentes:
@@ -270,6 +271,83 @@ def extract_attribute_candidates(
                     "primary_item",
                     ColumnDataType.STRING,
                     primary_item,
+                )
+            )
+
+    # -------------------------------------------------------------
+    # Campos observados en los ítems fuente.
+    #
+    # CSE conserva concept_source_map por concepto. DCB puede usarlo para
+    # descubrir la unión de atributos realmente presentes en las ofertas,
+    # sin imponer una plantilla fija. Los campos desconocidos se conservan
+    # con su nombre original para que PM6 pueda compararlos después.
+    # -------------------------------------------------------------
+    if isinstance(concept_source_map, dict):
+        observed_fields: dict[str, Any] = {}
+
+        standard_item_fields = (
+            ("description", "Descripción"),
+            ("quantity", "Cantidad"),
+            ("unit", "Unidad"),
+            ("unit_price", "Precio Unitario"),
+            ("total", "Total"),
+            ("code", "Código"),
+            ("brand", "Marca"),
+        )
+
+        def add_observed(
+            raw_name: Any,
+            value: Any,
+        ) -> None:
+            name = str(raw_name).strip()
+            if not name:
+                return
+            normalized = _normalize_attribute_name(name)
+            if not normalized or normalized in seen_names:
+                return
+            if normalized not in observed_fields:
+                observed_fields[normalized] = value
+
+        visible_by_normalized: dict[str, str] = {}
+
+        for source in concept_source_map.values():
+            if not isinstance(source, dict):
+                continue
+
+            for key, display_name in standard_item_fields:
+                value = source.get(key, "")
+                if value not in (None, ""):
+                    add_observed(display_name, value)
+                    visible_by_normalized.setdefault(
+                        _normalize_attribute_name(display_name),
+                        display_name,
+                    )
+
+            raw_fields = source.get("fields", {})
+            if isinstance(raw_fields, dict):
+                for key, value in raw_fields.items():
+                    if value in (None, ""):
+                        continue
+                    add_observed(key, value)
+                    visible_by_normalized.setdefault(
+                        _normalize_attribute_name(key),
+                        str(key).strip(),
+                    )
+
+        for normalized_name, value in sorted(observed_fields.items()):
+            if normalized_name in seen_names:
+                continue
+            visible_name = visible_by_normalized.get(
+                normalized_name,
+                normalized_name,
+            )
+            seen_names.add(normalized_name)
+            candidates.append(
+                (
+                    visible_name,
+                    "source_item",
+                    infer_data_type(value),
+                    value,
                 )
             )
 
@@ -475,6 +553,7 @@ def build_column_set_for_structure(
     candidates = extract_attribute_candidates(
         structure_view.available_attributes,
         structure_view.semantic_knowledge,
+        structure_view.concept_source_map,
     )
 
     columns: list[

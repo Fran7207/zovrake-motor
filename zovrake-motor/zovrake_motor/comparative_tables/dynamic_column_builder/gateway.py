@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID
 
@@ -24,6 +24,7 @@ class StructureView:
     semantic_knowledge: dict[str, Any]
     traceability: dict[str, Any]
     metadata: dict[str, Any]
+    concept_source_map: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -87,6 +88,11 @@ def _parse_structure(payload: dict[str, Any]) -> StructureView:
                 "metadata",
                 {},
             )
+        ),
+        concept_source_map=(
+            dict(metadata_prepared.get("concept_source_map", {}))
+            if isinstance(metadata_prepared.get("concept_source_map", {}), dict)
+            else {}
         ),
     )
 
