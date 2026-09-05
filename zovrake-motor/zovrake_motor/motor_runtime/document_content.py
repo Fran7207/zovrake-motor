@@ -64,6 +64,169 @@ _PROVIDER_SECTION_PATTERN = re.compile(
     r"informaci[oó]n\s+del\s+emisor)\b"
 )
 
+_ITEM_ADMINISTRATIVE_MARKERS = (
+    "razon social",
+    "razón social",
+    "cliente",
+    "direccion",
+    "dirección",
+    "ruc",
+    "cotizacion n",
+    "cotización n",
+    "fecha",
+    "moneda",
+    "subtotal",
+    "sub total",
+    "igv",
+    "iva",
+    "total",
+    "total inc",
+    "tipo de pago",
+    "forma de pago",
+    "condiciones comerciales",
+    "condiciones de pago",
+    "garantia",
+    "garantía",
+    "validez",
+    "tiempo de entrega",
+    "entrega",
+    "cuenta bancaria",
+    "cuenta corriente",
+    "cci",
+    "observaciones",
+    "observación",
+    "nota",
+)
+
+_UNIT_ALIASES = {
+    "und", "un", "unidad", "u", "u.m.", "um", "m", "mt", "mts",
+    "m2", "m²", "m3", "m³", "kg", "g", "t", "tn", "lt", "l",
+    "ml", "cm", "mm", "km", "hr", "h", "%", "bls", "bolsa",
+    "caja", "cj", "pza", "pz", "par", "jgo", "juego",
+}
+
+
+def _normalize_item_label(value: Any) -> str:
+    if value is None:
+        return ""
+    return " ".join(str(value).strip().casefold().split())
+
+
+def _looks_like_numeric_value(value: Any) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    text = re.sub(r"[^0-9,.-]", "", text)
+    return bool(re.fullmatch(r"[-+]?\d+(?:[.,]\d+)?", text))
+
+
+def _looks_like_unit_value(value: Any) -> bool:
+    normalized = _normalize_item_label(value)
+    if not normalized:
+        return False
+    compact = normalized.replace(" ", "")
+    return compact in {alias.replace(" ", "") for alias in _UNIT_ALIASES}
+
+
+def _looks_like_administrative_item_description(value: Any) -> bool:
+    normalized = _normalize_item_label(value)
+    if not normalized:
+        return False
+
+    return normalized.startswith(_ITEM_ADMINISTRATIVE_MARKERS)
+
+
+def _normalize_semantic_item_row(fields: dict[str, Any]) -> dict[str, Any]:
+    """Corrige intercambios evidentes de cantidad/unidad producidos por OCR/layout."""
+    normalized = dict(fields)
+
+    quantity = str(normalized.get("quantity") or "").strip()
+    unit = str(normalized.get("unit") or "").strip()
+
+    # Caso habitual en tablas escaneadas: la geometría/OCR intercambia
+    # CANT. y UNID. (ej. quantity='UND', unit='1').
+    if _looks_like_unit_value(quantity) and _looks_like_numeric_value(unit):
+        normalized["quantity"], normalized["unit"] = unit, quantity
+
+    return normalized
+
+
+def _is_strong_commercial_item_row(
+    *,
+    fields: dict[str, Any],
+    table_role: str,
+) -> bool:
+    """Determina si una fila representa una línea comercial y no metadata."""
+    description = str(
+        fields.get("description")
+        or fields.get("product")
+        or fields.get("producto")
+        or fields.get("concept")
+        or fields.get("concepto")
+        or fields.get("detail")
+        or fields.get("detalle")
+        or fields.get("material")
+        or fields.get("service")
+        or fields.get("servicio")
+        or ""
+    ).strip()
+    if not description:
+        return False
+
+    if _looks_like_administrative_item_description(description):
+        return False
+
+    quantity = str(fields.get("quantity") or "").strip()
+    unit = str(fields.get("unit") or "").strip()
+    unit_price = str(fields.get("unit_price") or "").strip()
+    total = str(fields.get("total") or "").strip()
+    code = str(
+        fields.get("code")
+        or fields.get("item_code")
+        or fields.get("sku")
+        or ""
+    ).strip()
+
+    commercial_signals = sum(
+        bool(value)
+        for value in (quantity, unit, unit_price, total, code)
+    )
+
+    numeric_commercial_signals = sum(
+        _looks_like_numeric_value(value)
+        for value in (quantity, unit_price, total)
+    )
+
+    strong_table_role = table_role == "commercial_items"
+
+    # Un rol comercial necesita al menos una combinación inequívoca:
+    # cantidad+unidad, precio/total, o código con precio/total.
+    has_quantity_and_unit = (
+        _looks_like_numeric_value(quantity)
+        and _looks_like_unit_value(unit)
+    )
+    has_price_signal = bool(unit_price or total) and bool(
+        numeric_commercial_signals
+    )
+    has_code_price = bool(code) and has_price_signal
+
+    if has_quantity_and_unit and has_price_signal:
+        return True
+    if has_code_price:
+        return True
+
+    # Algunos formatos legítimos solo proporcionan descripción + precio.
+    if has_price_signal and strong_table_role:
+        return True
+
+    # Una tabla sin rol firme requiere evidencia más fuerte.
+    return (
+        strong_table_role
+        and commercial_signals >= 3
+        and numeric_commercial_signals >= 1
+    )
+
+
 _LEGAL_ENTITY_PATTERN = re.compile(
     r"(?i)\b"
     r"[A-ZÁÉÍÓÚÜÑ0-9][A-ZÁÉÍÓÚÜÑ0-9&.,'()\/\-\s]{2,}"
@@ -607,7 +770,7 @@ def _decode_document_content(
     # ============================================================
 
     if fmt == "pdf":
-        processor = PDFDocumentProcessor()
+        processor = PDFDocumentProcessor(ocr_visual_pages=True)
 
         try:
             processed = processor.process(
@@ -1906,6 +2069,14 @@ def _semantic_tables_to_items(
             if not fields:
                 continue
 
+            fields = _normalize_semantic_item_row(fields)
+
+            if not _is_strong_commercial_item_row(
+                fields=fields,
+                table_role=table_role,
+            ):
+                continue
+
             description = ""
             for key in preferred_description_keys:
                 value = fields.get(key)
@@ -1955,14 +2126,6 @@ def _semantic_tables_to_items(
             # señal de cantidad/precio/total. Esto evita transformar tablas
             # de identidad o condiciones en "productos".
             if not description:
-                continue
-
-            if not (
-                quantity
-                or unit_price
-                or total
-                or unit
-            ):
                 continue
 
             result.append(
@@ -2174,63 +2337,130 @@ def _extract_tables_from_text(
     )
 
 
+def _infer_physical_item_column_indexes(
+    header: tuple[str, ...] | list[str],
+) -> dict[str, int]:
+    """Mapea columnas físicas por semántica, no por posición fija."""
+    aliases: dict[str, tuple[str, ...]] = {
+        "code": ("item", "ítem", "codigo", "código", "cod", "sku", "partida"),
+        "description": ("descripcion", "descripción", "producto", "concepto", "detalle", "material", "servicio"),
+        "quantity": ("cantidad", "cant", "qty", "volumen"),
+        "unit": ("unidad", "und", "unid", "u.m.", "um", "u.medida"),
+        "unit_price": ("precio unitario", "p unit", "p/u", "p. u.", "p.u.", "precio", "s/p. u."),
+        "total": ("total", "s/.total", "importe", "monto", "subtotal"),
+    }
+
+    def normalize(value: str) -> str:
+        return re.sub(r"\s+", " ", value.strip().casefold().replace(".", " ").replace("/", " "))
+
+    result: dict[str, int] = {}
+    for index, raw in enumerate(header):
+        normalized = normalize(str(raw))
+        if not normalized:
+            continue
+        for key, candidates in aliases.items():
+            if key in result:
+                continue
+            if any(
+                normalized == normalize(alias)
+                or normalize(alias) in normalized
+                for alias in candidates
+            ):
+                result[key] = index
+                break
+    return result
+
+
+def _build_physical_item_from_row(
+    *,
+    header: tuple[str, ...] | list[str],
+    row: tuple[str, ...] | list[str],
+    table_id: str,
+    index: int,
+) -> dict[str, Any] | None:
+    mapping = _infer_physical_item_column_indexes(header)
+    if "description" not in mapping:
+        return None
+
+    def value_for(key: str) -> str:
+        idx = mapping.get(key)
+        if idx is None or idx >= len(row):
+            return ""
+        return str(row[idx] or "").strip()
+
+    fields = {
+        str(header[idx]).strip() or f"column_{idx + 1}": str(row[idx] or "").strip()
+        for idx in range(min(len(header), len(row)))
+        if str(header[idx]).strip()
+    }
+
+    item = {
+        "item_id": f"{table_id}-row-{index}",
+        "description": value_for("description"),
+        "quantity": value_for("quantity"),
+        "unit_price": value_for("unit_price"),
+        "unit": value_for("unit"),
+        "total": value_for("total"),
+        "code": value_for("code"),
+        "fields": fields,
+        "source_kind": "physical_table_semantic_fallback",
+    }
+
+    normalized_fields = _normalize_semantic_item_row(item)
+    return item | normalized_fields
+
+
 def _tables_to_items(
     tables: tuple[dict[str, Any], ...],
 ) -> tuple[dict[str, Any], ...]:
+    """Fallback físico: reconstruye columnas por encabezado semántico."""
     items: list[dict[str, Any]] = []
 
     for table in tables:
-        rows = list(
-            table.get("rows") or []
-        )
+        raw_rows = table.get("rows") or []
+        rows = [tuple(str(cell).strip() for cell in row) for row in raw_rows]
+        if not rows:
+            continue
 
-        start = (
-            1
-            if rows
-            and _looks_like_header(
-                " ".join(
-                    str(c)
-                    for c in rows[0]
-                )
-            )
-            else 0
-        )
-
-        for index, row in enumerate(
-            rows[start:],
-        ):
-            cells = list(row)
-
-            if not cells:
+        header_index = 0
+        if not _looks_like_header(" ".join(rows[0])):
+            for candidate_index, candidate in enumerate(rows[:8]):
+                if _looks_like_header(" ".join(candidate)):
+                    header_index = candidate_index
+                    break
+            else:
                 continue
 
-            items.append(
-                {
-                    "item_id": (
-                        f"{table.get('table_id', 'table')}"
-                        f"-row-{index}"
-                    ),
-                    "description": (
-                        str(cells[0])
-                        if len(cells) > 0
-                        else ""
-                    ),
-                    "quantity": (
-                        str(cells[1])
-                        if len(cells) > 1
-                        else ""
-                    ),
-                    "unit_price": (
-                        str(cells[2])
-                        if len(cells) > 2
-                        else ""
-                    ),
-                    "unit": (
-                        str(cells[3])
-                        if len(cells) > 3
-                        else ""
-                    ),
-                }
+        header = rows[header_index]
+        mapping = _infer_physical_item_column_indexes(header)
+        if "description" not in mapping:
+            continue
+
+        table_id = str(table.get("table_id", "table")).strip() or "table"
+
+        for index, row in enumerate(rows[header_index + 1:]):
+            item = _build_physical_item_from_row(
+                header=header,
+                row=row,
+                table_id=table_id,
+                index=index,
             )
+            if item is None:
+                continue
+
+            fields = {
+                "description": item.get("description", ""),
+                "quantity": item.get("quantity", ""),
+                "unit": item.get("unit", ""),
+                "unit_price": item.get("unit_price", ""),
+                "total": item.get("total", ""),
+                "code": item.get("code", ""),
+            }
+
+            if _is_strong_commercial_item_row(
+                fields=fields,
+                table_role="commercial_items",
+            ):
+                items.append(item)
 
     return tuple(items)

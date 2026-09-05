@@ -52,8 +52,10 @@ class PDFDocumentProcessor:
         self,
         *,
         ocr_processor: OcrProcessor | None = None,
+        ocr_visual_pages: bool = False,
     ) -> None:
         self._ocr_processor = ocr_processor or OcrProcessor()
+        self._ocr_visual_pages = bool(ocr_visual_pages)
 
     def process(
         self,
@@ -341,6 +343,14 @@ class PDFDocumentProcessor:
             has_images=has_images,
             text_length=len(text.strip()),
         )
+
+        # En cotizaciones, una página digital puede tener texto suficiente
+        # para evitar OCR aunque el proveedor esté presente exclusivamente
+        # dentro de una imagen/logo. Cuando la integración visual está
+        # habilitada, también se procesa la capa visual y se conserva el OCR
+        # como evidencia adicional sin sustituir el texto nativo.
+        if self._ocr_visual_pages and has_images:
+            requires_ocr = True
 
         ocr_executed = False
         ocr_text = ""
