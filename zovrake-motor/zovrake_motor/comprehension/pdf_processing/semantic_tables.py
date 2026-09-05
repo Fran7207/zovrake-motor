@@ -304,6 +304,16 @@ class PdfSemanticTableAnalyzer:
             rows=semantic_rows,
         )
 
+        if table_role == "commercial_items":
+            semantic_rows = [
+                row
+                for row in semantic_rows
+                if self._is_semantically_commercial_row(row)
+            ]
+
+            if not semantic_rows:
+                return None
+
         return PdfSemanticTable(
             table_id=f"{table.table_id}-semantic",
             columns=tuple(
@@ -436,6 +446,16 @@ class PdfSemanticTableAnalyzer:
                 rows=rows,
             )
 
+            if table_role == "commercial_items":
+                rows = [
+                    row
+                    for row in rows
+                    if self._is_semantically_commercial_row(row)
+                ]
+
+                if not rows:
+                    continue
+
             semantic_tables.append(
                 PdfSemanticTable(
                     table_id=(
@@ -549,7 +569,12 @@ class PdfSemanticTableAnalyzer:
                 confidence = 0.35
 
             if key in used_keys:
-                key = f"{key}_{index + 1}"
+                suffix = 2
+                candidate_key = f"{key}_{suffix}"
+                while candidate_key in used_keys:
+                    suffix += 1
+                    candidate_key = f"{key}_{suffix}"
+                key = candidate_key
 
             used_keys.add(key)
 
@@ -572,10 +597,45 @@ class PdfSemanticTableAnalyzer:
         self,
         header: str,
     ) -> tuple[str | None, float]:
+        """
+        Clasifica un encabezado por significado, priorizando frases
+        específicas sobre alias genéricos.
+
+        Esto evita errores como:
+        ``PRECIO TOTAL`` -> ``unit_price`` por contener la palabra
+        ``precio``.
+        """
         normalized = self._normalize_label(header)
 
         if not normalized:
             return None, 0.0
+
+        # Frases discriminantes: se evalúan antes que alias genéricos.
+        if any(
+            token in normalized
+            for token in (
+                "precio total",
+                "total precio",
+                "s total",
+                "importe total",
+                "valor total",
+            )
+        ):
+            return "total", 0.98
+
+        if any(
+            token in normalized
+            for token in (
+                "precio unitario",
+                "precio unit",
+                "p unitario",
+                "p unit",
+                "p u",
+                "valor unitario",
+                "unit price",
+            )
+        ):
+            return "unit_price", 0.98
 
         exact_matches: list[str] = []
 
@@ -591,13 +651,32 @@ class PdfSemanticTableAnalyzer:
         if len(exact_matches) == 1:
             return exact_matches[0], 1.0
 
-        for key, aliases in self._COLUMN_ALIASES.items():
-            for alias in aliases:
+        # Los alias genéricos se resuelven con prioridades explícitas para
+        # que ``precio`` sea unit_price y no compita con ``total``.
+        priority = (
+            "description",
+            "quantity",
+            "unit",
+            "unit_price",
+            "total",
+            "code",
+            "brand",
+            "model",
+            "currency",
+            "discount",
+            "tax",
+        )
+
+        for key in priority:
+            for alias in self._COLUMN_ALIASES.get(key, ()):
                 normalized_alias = self._normalize_label(alias)
 
                 if (
-                    normalized_alias in normalized
-                    or normalized in normalized_alias
+                    normalized_alias
+                    and (
+                        normalized_alias in normalized
+                        or normalized in normalized_alias
+                    )
                 ):
                     return key, 0.82
 
@@ -673,6 +752,116 @@ class PdfSemanticTableAnalyzer:
                 semantic_rows.append(row)
 
         return semantic_rows
+
+    @classmethod
+    def _looks_like_non_commercial_row(
+        cls,
+        row: dict[str, Any],
+    ) -> bool:
+        """Detecta filas administrativas/financieras que no son partidas."""
+        description = " ".join(
+            str(
+                row.get(key, "")
+            ).strip()
+            for key in (
+                "description",
+                "product",
+                "producto",
+                "concept",
+                "concepto",
+                "detail",
+                "detalle",
+                "material",
+                "service",
+                "servicio",
+            )
+            if str(row.get(key, "")).strip()
+        )
+
+        normalized = cls._normalize_label(description)
+        if not normalized:
+            return True
+
+        administrative_prefixes = (
+            "razon social",
+            "cliente",
+            "direccion",
+            "ruc",
+            "cotizacion",
+            "fecha",
+            "moneda",
+            "subtotal",
+            "sub total",
+            "igv",
+            "iva",
+            "total",
+            "total inc",
+            "tipo de pago",
+            "forma de pago",
+            "condiciones comerciales",
+            "condiciones de pago",
+            "garantia",
+            "garantía",
+            "validez",
+            "tiempo de entrega",
+            "entrega",
+            "cuenta",
+            "cuenta bancaria",
+            "banco",
+            "observacion",
+            "observación",
+            "nota",
+        )
+
+        return normalized.startswith(administrative_prefixes)
+
+    @classmethod
+    def _is_semantically_commercial_row(
+        cls,
+        row: dict[str, Any],
+    ) -> bool:
+        """Validación semántica mínima para una partida comercial real."""
+        if cls._looks_like_non_commercial_row(row):
+            return False
+
+        description = " ".join(
+            str(row.get(key, "")).strip()
+            for key in (
+                "description",
+                "product",
+                "producto",
+                "concept",
+                "concepto",
+                "detail",
+                "detalle",
+                "material",
+                "service",
+                "servicio",
+            )
+            if str(row.get(key, "")).strip()
+        )
+        if not description or not re.search(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]", description):
+            return False
+
+        numeric = sum(
+            cls._looks_numeric(str(row.get(key, "")))
+            for key in (
+                "quantity",
+                "unit_price",
+                "total",
+            )
+        )
+        unit = str(row.get("unit", "")).strip()
+        code = str(row.get("code", "")).strip()
+
+        # Una línea comercial necesita una señal cuantitativa o un código
+        # que permita identificarla como partida.
+        return bool(
+            numeric >= 1
+            or cls._looks_like_unit(unit)
+            or cls._looks_like_code(code)
+        )
+
 
     @staticmethod
     def _calculate_confidence(
@@ -1327,11 +1516,25 @@ class PdfSemanticTableAnalyzer:
             matches,
             key=lambda item: item.x_center,
         ):
-            if match.key in used_keys:
-                continue
+            key = match.key
+            if key in used_keys:
+                suffix = 2
+                candidate_key = f"{key}_{suffix}"
+                while candidate_key in used_keys:
+                    suffix += 1
+                    candidate_key = f"{key}_{suffix}"
+                key = candidate_key
+
+            if key != match.key:
+                match = _HeaderMatch(
+                    key=key,
+                    label=match.label,
+                    words=match.words,
+                    confidence=match.confidence * 0.98,
+                )
 
             result.append(match)
-            used_keys.add(match.key)
+            used_keys.add(key)
 
         return result
 

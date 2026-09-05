@@ -139,3 +139,46 @@ def test_layout_analysis_keeps_single_table_behavior() -> None:
     assert len(tables) == 1
     assert len(tables[0].columns) == 4
     assert len(tables[0].rows) == 1
+
+
+def test_header_semantics_prioritize_specific_price_phrases() -> None:
+    analyzer = PdfSemanticTableAnalyzer()
+
+    assert analyzer._classify_header("PRECIO TOTAL") == ("total", 0.98)
+    assert analyzer._classify_header("S/.TOTAL") == ("total", 0.98)
+    assert analyzer._classify_header("S/P.U.") == ("unit_price", 0.98)
+    assert analyzer._classify_header("PRECIO UNITARIO") == ("unit_price", 0.98)
+
+
+def test_physical_analysis_filters_administrative_rows_after_table_role_classification() -> None:
+    analyzer = PdfSemanticTableAnalyzer()
+
+    table = type(
+        "PdfTableStub",
+        (),
+        {
+            "table_id": "quote-mixed",
+            "page_number": 1,
+            "rows": (
+                ("ITEM", "DESCRIPCIÓN", "UNID.", "CANT.", "S/P.U.", "S/.TOTAL"),
+                ("", "Razón Social", "", "INVERSIONES EVZA S.R.L.", "", ""),
+                ("1", "Tubería PVC-U UF 110MM PN5", "UND", "1", "160.00", "160.00"),
+                ("", "Subtotal", "", "", "", "160.00"),
+            ),
+        },
+    )()
+
+    semantic = analyzer.analyze(table)
+
+    assert semantic is not None
+    assert semantic.table_role == "commercial_items"
+    assert semantic.rows == (
+        {
+            "code": "1",
+            "description": "Tubería PVC-U UF 110MM PN5",
+            "unit": "UND",
+            "quantity": "1",
+            "unit_price": "160.00",
+            "total": "160.00",
+        },
+    )
