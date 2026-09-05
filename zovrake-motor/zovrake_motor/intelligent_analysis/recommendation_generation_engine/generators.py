@@ -398,7 +398,7 @@ def _numeric(
     if not text:
         return None
 
-    cleaned = re.sub(
+    cleaned = "re".sub(
         r"[^0-9,.\-+]",
         "",
         text,

@@ -117,3 +117,98 @@ def test_physical_fallback_uses_header_semantics_instead_of_fixed_positions() ->
     assert items[2]["quantity"] == "1"
     assert items[2]["unit"] == "UND"
     assert items[2]["unit_price"] == "120.00"
+
+
+def test_derived_items_table_discovers_only_present_columns_and_preserves_extra_fields() -> None:
+    items = (
+        {
+            "item_id": "i1",
+            "description": "Cemento Portland Tipo I",
+            "quantity": "100",
+            "unit": "BLS",
+            "unit_price": "32.00",
+            "total": "3200.00",
+            "code": "CEM-001",
+            "fields": {
+                "brand": "Sol",
+                "presentacion": "42.5 KG",
+            },
+        },
+        {
+            "item_id": "i2",
+            "description": "Cemento Portland Tipo I",
+            "quantity": "120",
+            "unit": "BLS",
+            "unit_price": "30.00",
+            "total": "3600.00",
+            "code": "CEM-002",
+            "fields": {
+                "brand": "Pacasmayo",
+                "norma": "NTP",
+            },
+        },
+    )
+
+    from zovrake_motor.motor_runtime.document_content import _items_to_tables
+
+    table = _items_to_tables(items)[0]
+    assert table["semantic_role"] == "commercial_items_projection"
+    assert table["columns_discovered"][:6] == [
+        "code",
+        "description",
+        "quantity",
+        "unit",
+        "unit_price",
+        "total",
+    ]
+    assert "presentacion" in table["columns_discovered"]
+    assert "norma" in table["columns_discovered"]
+    assert table["rows"][1][1] == "Cemento Portland Tipo I"
+
+
+def test_comparative_projection_preserves_full_document_boundary() -> None:
+    from zovrake_motor.motor_runtime.document_content import _build_comparative_projection
+
+    projection = _build_comparative_projection(
+        document_id="DOC-001",
+        semantic_tables=(
+            {
+                "table_id": "t1",
+                "table_role": "commercial_items",
+                "rows": [{"description": "Cemento", "quantity": "10"}],
+            },
+            {
+                "table_id": "t2",
+                "table_role": "banking",
+                "rows": [{"account": "123"}],
+            },
+        ),
+        items=(
+            {
+                "item_id": "item-1",
+                "description": "Cemento",
+                "quantity": "10",
+                "unit": "BLS",
+                "unit_price": "32",
+                "fields": {"brand": "Sol"},
+                "source_kind": "semantic_table",
+                "source_table_id": "t1",
+                "source_page_number": 1,
+            },
+        ),
+        financial_information={"fact_count": 3},
+        provider_resolution={
+            "provider_name": "Proveedor S.A.C.",
+            "provider_ruc": "20123456789",
+            "resolved": True,
+            "confidence": 0.95,
+        },
+    )
+
+    assert projection["projection_version"] == "zo-041-1.0"
+    assert projection["commercial_item_count"] == 1
+    assert projection["semantic_table_roles"]["banking"] == 1
+    assert projection["financial_information"]["fact_count"] == 3
+    assert projection["source_information_preserved"] is True
+    assert projection["comparison_projection_only"] is True
+    assert projection["provider"]["name"] == "Proveedor S.A.C."

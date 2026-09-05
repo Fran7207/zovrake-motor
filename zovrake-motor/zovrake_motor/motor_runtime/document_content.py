@@ -553,6 +553,14 @@ def resolve_evidence_documents(
         total = _detect_total(text)
         payment = _detect_payment_terms(text)
 
+        comparative_projection = _build_comparative_projection(
+            document_id=document_id,
+            semantic_tables=semantic_tables,
+            items=items,
+            financial_information=financial_information,
+            provider_resolution=provider_resolution,
+        )
+
         resolved.append(
             ResolvedDocumentContent(
                 document_id=document_id,
@@ -604,6 +612,7 @@ def resolve_evidence_documents(
                             (),
                         )
                     ),
+                    "comparative_projection": comparative_projection,
                     **(
                         {"pdf_processing": pdf_processing}
                         if pdf_processing
@@ -2232,52 +2241,188 @@ def _looks_like_header(
 def _items_to_tables(
     items: tuple[dict[str, Any], ...],
 ) -> tuple[dict[str, Any], ...]:
-    rows = [
-        (
-            "Descripción",
-            "Cantidad",
-            "Precio unitario",
-            "Unidad",
-        )
-    ]
+    """
+    Proyecta ítems a una tabla derivada sin imponer cuatro columnas fijas.
+
+    El orden de los campos canónicos solamente aporta estabilidad visual;
+    las columnas presentes se descubren a partir de los datos reales de los
+    ítems y cualquier atributo adicional de ``fields`` se conserva.
+    """
+    if not items:
+        return ()
+
+    canonical_labels = {
+        "code": "Código",
+        "description": "Descripción",
+        "quantity": "Cantidad",
+        "unit": "Unidad",
+        "unit_price": "Precio Unitario",
+        "total": "Total",
+        "brand": "Marca",
+        "model": "Modelo",
+    }
+
+    canonical_order = (
+        "code",
+        "description",
+        "quantity",
+        "unit",
+        "unit_price",
+        "total",
+        "brand",
+        "model",
+    )
+
+    present: set[str] = set()
+    extra_fields: list[str] = []
 
     for item in items:
-        rows.append(
-            (
-                str(
-                    item.get(
-                        "description",
-                        "",
-                    )
-                ),
-                str(
-                    item.get(
-                        "quantity",
-                        "",
-                    )
-                ),
-                str(
-                    item.get(
-                        "unit_price",
-                        "",
-                    )
-                ),
-                str(
-                    item.get(
-                        "unit",
-                        "",
-                    )
-                ),
+        if not isinstance(item, dict):
+            continue
+
+        for key in canonical_order:
+            if str(item.get(key, "") or "").strip():
+                present.add(key)
+
+        raw_fields = item.get("fields", {})
+        if not isinstance(raw_fields, dict):
+            continue
+
+        for key, value in raw_fields.items():
+            name = str(key).strip()
+            if not name or value in (None, ""):
+                continue
+
+            normalized = _normalize_item_label(name)
+            if normalized in {
+                _normalize_item_label(label)
+                for label in canonical_labels.values()
+            }:
+                continue
+
+            if name not in extra_fields:
+                extra_fields.append(name)
+
+    columns = [
+        key
+        for key in canonical_order
+        if key in present
+    ]
+    columns.extend(extra_fields)
+
+    if not columns:
+        return ()
+
+    headers = [
+        canonical_labels.get(key, key)
+        for key in columns
+    ]
+
+    rows: list[tuple[str, ...]] = [tuple(headers)]
+
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+
+        fields = item.get("fields", {})
+        if not isinstance(fields, dict):
+            fields = {}
+
+        row: list[str] = []
+        for key in columns:
+            if key in canonical_labels:
+                value = item.get(key, "")
+            else:
+                value = fields.get(key, "")
+
+            row.append(
+                "" if value is None else str(value).strip()
             )
-        )
+
+        rows.append(tuple(row))
 
     return (
         {
-            "table_id": "table-items-1",
+            "table_id": "table-items-derived-1",
             "rows": rows,
+            "semantic_role": "commercial_items_projection",
+            "columns_discovered": list(columns),
+            "source_item_count": len(items),
         },
     )
 
+
+def _build_comparative_projection(
+    *,
+    document_id: str,
+    semantic_tables: tuple[dict[str, Any], ...],
+    items: tuple[dict[str, Any], ...],
+    financial_information: dict[str, Any],
+    provider_resolution: dict[str, Any],
+) -> dict[str, Any]:
+    """
+    Crea el contrato explícito que separa conocimiento total de proyección
+    comparativa.
+
+    No elimina información del documento: ``document_knowledge`` y las
+    tablas semánticas siguen viajando completos. Esta proyección identifica
+    solamente qué elementos pueden participar en PM6 y conserva su origen.
+    """
+    item_snapshots: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+
+        item_snapshots.append(
+            {
+                "item_id": str(item.get("item_id", "")),
+                "description": str(item.get("description", "")),
+                "quantity": str(item.get("quantity", "")),
+                "unit": str(item.get("unit", "")),
+                "unit_price": str(item.get("unit_price", "")),
+                "total": str(item.get("total", "")),
+                "code": str(item.get("code", "")),
+                "fields": dict(
+                    item.get("fields", {})
+                    if isinstance(item.get("fields", {}), dict)
+                    else {}
+                ),
+                "source_kind": str(item.get("source_kind", "")),
+                "source_table_id": str(item.get("source_table_id", "")),
+                "source_page_number": item.get("source_page_number"),
+                "semantic_table_confidence": item.get(
+                    "semantic_table_confidence",
+                    0.0,
+                ),
+            }
+        )
+
+    table_roles: dict[str, int] = {}
+    for table in semantic_tables:
+        if not isinstance(table, dict):
+            continue
+        role = str(
+            table.get("table_role", "unknown")
+        ).strip() or "unknown"
+        table_roles[role] = table_roles.get(role, 0) + 1
+
+    return {
+        "projection_version": "zo-041-1.0",
+        "document_id": document_id,
+        "provider": {
+            "name": str(provider_resolution.get("provider_name", "")),
+            "ruc": str(provider_resolution.get("provider_ruc", "")),
+            "resolved": bool(provider_resolution.get("resolved", False)),
+            "confidence": float(provider_resolution.get("confidence", 0.0)),
+        },
+        "commercial_items": item_snapshots,
+        "commercial_item_count": len(item_snapshots),
+        "semantic_table_roles": table_roles,
+        "financial_information": dict(financial_information),
+        "source_semantic_table_count": len(semantic_tables),
+        "source_information_preserved": True,
+        "comparison_projection_only": True,
+    }
 
 def _extract_tables_from_text(
     text: str,
