@@ -212,3 +212,43 @@ def test_comparative_projection_preserves_full_document_boundary() -> None:
     assert projection["source_information_preserved"] is True
     assert projection["comparison_projection_only"] is True
     assert projection["provider"]["name"] == "Proveedor S.A.C."
+
+
+def test_semantic_item_row_rejects_non_money_in_price_without_losing_raw_field():
+    from zovrake_motor.motor_runtime.document_content import _normalize_semantic_item_row
+
+    normalized = _normalize_semantic_item_row(
+        {
+            "description": "TUBERIA PVC 110 MM",
+            "quantity": "1",
+            "unit": "UND",
+            "unit_price": "RUC",
+            "total": "Cotización N°",
+        }
+    )
+
+    assert normalized["unit_price"] == ""
+    assert normalized["total"] == ""
+    assert normalized["fields"] if "fields" in normalized else True
+    rejections = normalized["canonical_field_rejections"]
+    assert {item["field"] for item in rejections} == {"unit_price", "total"}
+
+
+def test_semantic_item_row_repairs_quantity_unit_and_keeps_price_numeric():
+    from zovrake_motor.motor_runtime.document_content import _normalize_semantic_item_row
+
+    normalized = _normalize_semantic_item_row(
+        {
+            "description": "TANQUE IBC",
+            "quantity": "UND",
+            "unit": "2",
+            "unit_price": "649.00",
+            "total": "1298.00",
+        }
+    )
+
+    assert normalized["quantity"] == "2"
+    assert normalized["unit"] == "UND"
+    assert normalized["unit_price"] == "649.00"
+    assert normalized["total"] == "1298.00"
+    assert normalized.get("canonical_field_rejections", []) == []

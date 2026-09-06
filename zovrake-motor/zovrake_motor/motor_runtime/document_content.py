@@ -136,17 +136,73 @@ def _looks_like_administrative_item_description(value: Any) -> bool:
     return normalized.startswith(_ITEM_ADMINISTRATIVE_MARKERS)
 
 
+def _looks_like_price_value(value: Any) -> bool:
+    """Determina si un valor es compatible con un importe/precio comercial."""
+    text = str(value or "").strip()
+    if not text:
+        return False
+
+    # Preserva formatos monetarios usuales: 1,200.50 / 1200,50 / S/ 1200.50.
+    compact = re.sub(
+        r"(?i)\b(?:s/|s\.|pen|usd|us\$|\$|eur|€)\b|[^0-9,.-]",
+        "",
+        text,
+    )
+    compact = compact.strip(".,-")
+
+    if not compact:
+        return False
+
+    return bool(
+        re.fullmatch(
+            r"[-+]?\d{1,3}(?:[.,]\d{3})*(?:[.,]\d+)?|[-+]?\d+(?:[.,]\d+)?",
+            compact,
+        )
+    )
+
+
 def _normalize_semantic_item_row(fields: dict[str, Any]) -> dict[str, Any]:
-    """Corrige intercambios evidentes de cantidad/unidad producidos por OCR/layout."""
+    """
+    Repara intercambios inequívocos y evita contaminar campos canónicos.
+
+    La información original nunca se destruye: permanece en ``fields``. Los
+    campos canónicos solamente se rellenan cuando el valor es compatible con
+    su papel semántico. Esto evita casos como ``precio='RUC'`` o
+    ``precio='Cotización N°'`` después de un OCR/layout defectuoso.
+    """
     normalized = dict(fields)
 
     quantity = str(normalized.get("quantity") or "").strip()
     unit = str(normalized.get("unit") or "").strip()
+    unit_price = str(normalized.get("unit_price") or "").strip()
+    total = str(normalized.get("total") or "").strip()
 
     # Caso habitual en tablas escaneadas: la geometría/OCR intercambia
     # CANT. y UNID. (ej. quantity='UND', unit='1').
     if _looks_like_unit_value(quantity) and _looks_like_numeric_value(unit):
         normalized["quantity"], normalized["unit"] = unit, quantity
+
+    # Un precio/total que no es numérico se conserva únicamente en ``fields``.
+    # No lo promovemos al dato canónico utilizado por PM6/PM7.
+    if unit_price and not _looks_like_price_value(unit_price):
+        normalized["unit_price"] = ""
+        normalized.setdefault("canonical_field_rejections", []).append(
+            {
+                "field": "unit_price",
+                "raw_value": unit_price,
+                "reason": "value_not_compatible_with_price",
+            }
+        )
+
+    if total and not _looks_like_price_value(total):
+        normalized["total"] = ""
+        normalized.setdefault("canonical_field_rejections", []).append(
+            {
+                "field": "total",
+                "raw_value": total,
+                "reason": "value_not_compatible_with_money",
+            }
+        )
 
     return normalized
 
@@ -2086,6 +2142,13 @@ def _semantic_tables_to_items(
             ):
                 continue
 
+            canonical_field_rejections = fields.get(
+                "canonical_field_rejections",
+                (),
+            )
+            if not isinstance(canonical_field_rejections, (list, tuple)):
+                canonical_field_rejections = ()
+
             description = ""
             for key in preferred_description_keys:
                 value = fields.get(key)
@@ -2147,7 +2210,14 @@ def _semantic_tables_to_items(
                     "quantity": quantity,
                     "unit_price": unit_price,
                     "unit": unit,
-                    "fields": fields,
+                    "fields": {
+                        key: value
+                        for key, value in fields.items()
+                        if key != "canonical_field_rejections"
+                    },
+                    "canonical_field_rejections": list(
+                        canonical_field_rejections
+                    ),
                     "source_kind": "semantic_table",
                     "source_table_id": table_id,
                     "source_page_number": table.get(
@@ -2552,7 +2622,24 @@ def _build_physical_item_from_row(
     }
 
     normalized_fields = _normalize_semantic_item_row(item)
-    return item | normalized_fields
+    canonical_field_rejections = normalized_fields.get(
+        "canonical_field_rejections",
+        (),
+    )
+    normalized_fields = {
+        key: value
+        for key, value in normalized_fields.items()
+        if key != "canonical_field_rejections"
+    }
+    return (
+        item
+        | normalized_fields
+        | {
+            "canonical_field_rejections": list(
+                canonical_field_rejections
+            )
+        }
+    )
 
 
 def _tables_to_items(
