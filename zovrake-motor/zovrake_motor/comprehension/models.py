@@ -191,6 +191,7 @@ class DocumentKnowledge:
     # Representación física/documental.
     regions: tuple[DocumentRegion, ...] = ()
     text: str = ""
+    visual_text: str = ""
     tables: tuple[dict[str, Any], ...] = ()
     images: tuple[dict[str, Any], ...] = ()
     ocr_blocks: tuple[dict[str, Any], ...] = ()
@@ -256,6 +257,7 @@ class DocumentKnowledge:
                 for region in self.regions
             ],
             "text": self.text,
+            "visual_text": self.visual_text,
             "tables": list(self.tables),
             "images": list(self.images),
             "ocr_blocks": list(self.ocr_blocks),

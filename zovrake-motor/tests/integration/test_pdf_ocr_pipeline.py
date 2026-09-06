@@ -82,7 +82,7 @@ def test_real_ocr_executes_on_image_only_pdf() -> None:
     )
 
 
-def test_digital_fixture_does_not_execute_ocr() -> None:
+def test_selective_ocr_mode_preserves_image_trigger() -> None:
     pdf_path = (
         PROJECT_ROOT
         / "tests"
@@ -90,13 +90,16 @@ def test_digital_fixture_does_not_execute_ocr() -> None:
         / "COTIZACION.pdf"
     )
 
-    document = PDFDocumentProcessor().process(
+    document = PDFDocumentProcessor(ocr_all_pages=False).process(
         document_id="OCR-CONTROL-001",
         file_name=pdf_path.name,
         pdf_bytes=pdf_path.read_bytes(),
     )
 
-    assert document.ocr_required is False
-    assert document.ocr_executed is False
-    assert document.ocr_pages_executed == ()
-    assert document.extraction_method == "native_pdf"
+    # El modo selectivo sigue ejecutando OCR cuando la página contiene
+    # imágenes, aunque no fuerce OCR sobre todas las páginas.
+    assert document.has_images is True
+    assert document.ocr_required is True
+    assert document.ocr_executed is True
+    assert document.ocr_pages_executed == (1,)
+    assert document.extraction_method == "native_pdf+ocr"

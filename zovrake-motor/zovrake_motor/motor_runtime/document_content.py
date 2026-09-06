@@ -835,7 +835,7 @@ def _decode_document_content(
     # ============================================================
 
     if fmt == "pdf":
-        processor = PDFDocumentProcessor(ocr_visual_pages=True)
+        processor = PDFDocumentProcessor(ocr_visual_pages=True, ocr_all_pages=True)
 
         try:
             processed = processor.process(

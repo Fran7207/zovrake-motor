@@ -52,10 +52,12 @@ class PDFDocumentProcessor:
         self,
         *,
         ocr_processor: OcrProcessor | None = None,
-        ocr_visual_pages: bool = False,
+        ocr_visual_pages: bool = True,
+        ocr_all_pages: bool = False,
     ) -> None:
         self._ocr_processor = ocr_processor or OcrProcessor()
         self._ocr_visual_pages = bool(ocr_visual_pages)
+        self._ocr_all_pages = bool(ocr_all_pages)
 
     def process(
         self,
@@ -112,6 +114,7 @@ class PDFDocumentProcessor:
         full_text_parts: list[str] = []
         document_warnings: list[str] = []
         document_errors: list[str] = []
+        visual_text_parts: list[str] = []
 
         page_count = len(reader.pages)
 
@@ -151,6 +154,12 @@ class PDFDocumentProcessor:
                     )
 
                 document_warnings.extend(page_result.warnings)
+
+                if page_result.visual_text.strip():
+                    visual_text_parts.append(
+                        f"[Página {page_number}]\n"
+                        f"{page_result.visual_text}"
+                    )
 
             except Exception as exc:
                 error_message = (
@@ -253,6 +262,27 @@ class PDFDocumentProcessor:
                 "Una o más páginas presentaron errores."
             )
 
+        visual_ocr_pages_executed = tuple(
+            page.page_number
+            for page in pages
+            if page.visual_ocr_attempted and page.ocr_executed
+        )
+        visual_ocr_complete = (
+            bool(pages)
+            and len(visual_ocr_pages_executed) == len(pages)
+        )
+        visual_text = "\n\n".join(
+            part
+            for part in visual_text_parts
+            if part.strip()
+        ).strip()
+
+        if self._ocr_all_pages and not visual_ocr_complete:
+            document_warnings.append(
+                "La lectura visual no alcanzó cobertura completa en "
+                "todas las páginas del PDF."
+            )
+
         return ProcessedPdfDocument(
             document_id=document_id,
             file_name=file_name,
@@ -269,6 +299,9 @@ class PDFDocumentProcessor:
             ocr_confidence=round(ocr_confidence, 4),
             ocr_language=ocr_language,
             ocr_dpi=ocr_dpi,
+            visual_text=visual_text,
+            visual_ocr_complete=visual_ocr_complete,
+            visual_ocr_pages_executed=visual_ocr_pages_executed,
             extraction_method=(
                 "native_pdf+ocr"
                 if ocr_executed
@@ -304,6 +337,7 @@ class PDFDocumentProcessor:
             plumber_page,
             warnings,
         )
+        native_text = text
 
         text_blocks = self._extract_text_blocks(
             page_number,
@@ -349,7 +383,9 @@ class PDFDocumentProcessor:
         # dentro de una imagen/logo. Cuando la integración visual está
         # habilitada, también se procesa la capa visual y se conserva el OCR
         # como evidencia adicional sin sustituir el texto nativo.
-        if self._ocr_visual_pages and has_images:
+        if self._ocr_all_pages:
+            requires_ocr = True
+        elif self._ocr_visual_pages and has_images:
             requires_ocr = True
 
         ocr_executed = False
@@ -358,8 +394,12 @@ class PDFDocumentProcessor:
         ocr_confidence = 0.0
         ocr_language = ""
         ocr_dpi: int | None = None
+        visual_text = ""
+        visual_ocr_attempted = False
+        visual_ocr_complete = False
 
         if requires_ocr:
+            visual_ocr_attempted = True
             try:
                 ocr_result = self._ocr_processor.process_page(
                     pdf_bytes=pdf_bytes,
@@ -371,6 +411,9 @@ class PDFDocumentProcessor:
                 ocr_confidence = ocr_result.confidence
                 ocr_language = ocr_result.language
                 ocr_dpi = ocr_result.dpi
+
+                visual_text = ocr_text
+                visual_ocr_complete = True
                 ocr_blocks = tuple(
                     PdfOcrBlock(
                         block_id=(
@@ -431,6 +474,7 @@ class PDFDocumentProcessor:
                     )
 
             except Exception as exc:
+                visual_ocr_complete = False
                 warnings.append(
                     f"Página {page_number}: no fue posible ejecutar OCR: {exc}"
                 )
@@ -444,6 +488,7 @@ class PDFDocumentProcessor:
             width=width,
             height=height,
             text=text,
+            native_text=native_text,
             text_blocks=tuple(text_blocks),
             tables=tuple(tables),
             semantic_tables=tuple(semantic_tables),
@@ -452,6 +497,9 @@ class PDFDocumentProcessor:
             has_tables=has_tables,
             has_images=has_images,
             requires_ocr=requires_ocr,
+            visual_text=visual_text,
+            visual_ocr_complete=visual_ocr_complete,
+            visual_ocr_attempted=visual_ocr_attempted,
             ocr_executed=ocr_executed,
             ocr_text=ocr_text,
             ocr_blocks=ocr_blocks,
@@ -947,7 +995,6 @@ class PDFDocumentProcessor:
 
         return " ".join(text.split())
 
-    @classmethod
     @staticmethod
     def _normalize_comparison_text(value: str) -> str:
         return " ".join(value.lower().split())

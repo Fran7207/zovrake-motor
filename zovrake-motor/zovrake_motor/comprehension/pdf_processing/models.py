@@ -199,12 +199,13 @@ class PdfOcrBlock:
 
 @dataclass(frozen=True)
 class PdfPageAnalysis:
-    """Análisis físico y documental de una página PDF."""
+    """Análisis físico, textual y visual de una página PDF."""
 
     page_number: int
     width: float
     height: float
     text: str
+    native_text: str = ""
     text_blocks: tuple[PdfTextBlock, ...] = ()
     tables: tuple[PdfTable, ...] = ()
     semantic_tables: tuple[PdfSemanticTable, ...] = ()
@@ -213,6 +214,11 @@ class PdfPageAnalysis:
     has_tables: bool = False
     has_images: bool = False
     requires_ocr: bool = False
+
+    # Cobertura de lectura visual del contenido de la página.
+    visual_text: str = ""
+    visual_ocr_complete: bool = False
+    visual_ocr_attempted: bool = False
 
     # Información específica de OCR.
     ocr_executed: bool = False
@@ -231,6 +237,7 @@ class PdfPageAnalysis:
             "width": self.width,
             "height": self.height,
             "text": self.text,
+            "native_text": self.native_text,
             "text_blocks": [
                 block.to_dict()
                 for block in self.text_blocks
@@ -251,6 +258,9 @@ class PdfPageAnalysis:
             "has_tables": self.has_tables,
             "has_images": self.has_images,
             "requires_ocr": self.requires_ocr,
+            "visual_text": self.visual_text,
+            "visual_ocr_complete": self.visual_ocr_complete,
+            "visual_ocr_attempted": self.visual_ocr_attempted,
             "ocr_executed": self.ocr_executed,
             "ocr_text": self.ocr_text,
             "ocr_blocks": [
@@ -286,6 +296,11 @@ class ProcessedPdfDocument:
     ocr_confidence: float = 0.0
     ocr_language: str = ""
     ocr_dpi: int | None = None
+
+    # Cobertura visual global: OCR ejecutado para cada página procesable.
+    visual_text: str = ""
+    visual_ocr_complete: bool = False
+    visual_ocr_pages_executed: tuple[int, ...] = ()
 
     extraction_method: str = "native_pdf"
     warnings: tuple[str, ...] = ()
@@ -338,6 +353,9 @@ class ProcessedPdfDocument:
             "ocr_confidence": self.ocr_confidence,
             "ocr_language": self.ocr_language,
             "ocr_dpi": self.ocr_dpi,
+            "visual_text": self.visual_text,
+            "visual_ocr_complete": self.visual_ocr_complete,
+            "visual_ocr_pages_executed": list(self.visual_ocr_pages_executed),
             "extraction_method": self.extraction_method,
             "warnings": list(self.warnings),
             "errors": list(self.errors),

@@ -153,6 +153,15 @@ class DocumentKnowledgeBuilder:
                 "source_ocr_dpi": (
                     document.ocr_dpi
                 ),
+                "source_visual_ocr_complete": (
+                    document.visual_ocr_complete
+                ),
+                "source_visual_ocr_pages_executed": (
+                    list(document.visual_ocr_pages_executed)
+                ),
+                "source_visual_text_length": (
+                    len(document.visual_text)
+                ),
                 "region_count": len(regions),
                 "evidence_count": len(evidence),
                 "unresolved_count": len(unresolved),
@@ -166,6 +175,7 @@ class DocumentKnowledgeBuilder:
             page_count=document.page_count,
             regions=tuple(regions),
             text=document.full_text,
+            visual_text=document.visual_text,
             tables=tuple(
                 table.to_dict()
                 for table in document.tables
