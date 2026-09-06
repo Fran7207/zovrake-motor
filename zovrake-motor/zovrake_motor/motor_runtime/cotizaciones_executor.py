@@ -2199,45 +2199,157 @@ class CotizacionesAnalysisExecutor:
                         "sin una fuente documental compatible."
                     )
     @staticmethod
-    def _ensure_comparable_duplicate(normalized_catalog: dict[str, Any]) -> dict[str, Any]:
-        catalog = copy.deepcopy(normalized_catalog)
-        concepts = list(catalog.get("concepts", []))
-        if len(concepts) >= 2:
-            return catalog
-        if not concepts:
-            return catalog
-        duplicate = copy.deepcopy(concepts[0])
-        normalized_id = str(duplicate.get("normalized_concept_id", "concept-1"))
-        duplicate["normalized_concept_id"] = f"{normalized_id}-dup"
-        concepts.append(duplicate)
-        catalog["concepts"] = concepts
-        return catalog
+    def _ensure_comparable_duplicate(
+        normalized_catalog: dict[str, Any],
+    ) -> dict[str, Any]:
+        """
+        Compatibility guard for legacy callers.
+
+        Nunca fabrica conceptos. Un catálogo con un solo concepto representa
+        una sola observación real y no debe convertirse artificialmente en una
+        comparación de dos proveedores.
+        """
+        return copy.deepcopy(normalized_catalog)
 
     @staticmethod
     def _seed_concepts_from_items(
         concept_catalog: dict[str, Any],
         internal_model: dict[str, Any],
     ) -> dict[str, Any]:
+        """
+        Crea conceptos de respaldo únicamente desde ítems reales del modelo
+        documental. Preserva proveedor, documento e identidad del ítem.
+        """
         catalog = copy.deepcopy(concept_catalog)
         concepts = list(catalog.get("concepts", []))
-        for index, item in enumerate(internal_model.get("items", [])):
-            description = str(item.get("description", "")).strip()
+
+        document_id = str(
+            internal_model.get(
+                "document_id",
+                internal_model.get(
+                    "source_document",
+                    {},
+                ).get(
+                    "document_id",
+                    "",
+                ),
+            )
+            or ""
+        ).strip()
+
+        provider_name = str(
+            internal_model.get(
+                "provider_name",
+                internal_model.get(
+                    "source_document",
+                    {},
+                ).get(
+                    "provider_name",
+                    "",
+                ),
+            )
+            or ""
+        ).strip()
+
+        existing_concept_ids = {
+            str(concept.get("concept_id", "")).strip()
+            for concept in concepts
+            if isinstance(concept, dict)
+        }
+
+        for index, item in enumerate(
+            internal_model.get(
+                "items",
+                [],
+            )
+        ):
+            if not isinstance(item, dict):
+                continue
+
+            description = str(
+                item.get(
+                    "description",
+                    "",
+                )
+                or ""
+            ).strip()
+
             if not description:
                 continue
+
+            item_id = str(
+                item.get(
+                    "item_id",
+                    "",
+                )
+                or f"item-{index + 1}",
+            ).strip()
+
+            concept_id = (
+                f"seed://"
+                f"{document_id or 'document'}/"
+                f"{item_id}"
+            )
+
+            if concept_id in existing_concept_ids:
+                continue
+
+            existing_concept_ids.add(
+                concept_id
+            )
+
+            fields = item.get(
+                "fields",
+                {},
+            )
+            if not isinstance(fields, dict):
+                fields = {}
+
+            metadata = {
+                "item_id": item_id,
+                "document_id": document_id,
+                "provider_name": provider_name,
+                "quantity": item.get(
+                    "quantity",
+                    "",
+                ),
+                "unit": item.get(
+                    "unit",
+                    "",
+                ),
+                "unit_price": item.get(
+                    "unit_price",
+                    "",
+                ),
+                "total": item.get(
+                    "total",
+                    "",
+                ),
+                "code": item.get(
+                    "code",
+                    "",
+                ),
+                "fields": dict(fields),
+                "source": "document_item_seed",
+            }
+
             concepts.append(
                 {
-                    "concept_id": f"seed://item-{index + 1}",
-                    "normalized_concept_id": f"seed-concept-{index + 1}",
+                    "concept_id": concept_id,
+                    "normalized_concept_id": concept_id,
                     "kind": "item",
                     "original_description": description,
                     "classification_pending": False,
-                    "metadata": {
-                        "quantity": item.get("quantity", ""),
-                        "unit_price": item.get("unit_price", ""),
-                        "unit": item.get("unit", ""),
+                    "metadata": metadata,
+                    "traceability": {
+                        "document_id": document_id,
+                        "document_ids": [document_id] if document_id else [],
+                        "source_item_id": item_id,
+                        "provider_name": provider_name,
                     },
                 }
             )
+
         catalog["concepts"] = concepts
         return catalog
 
