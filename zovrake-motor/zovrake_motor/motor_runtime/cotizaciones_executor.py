@@ -1127,6 +1127,18 @@ class CotizacionesAnalysisExecutor:
                     "El campo concepts de cada catálogo debe ser una lista."
                 )
 
+            source_document = catalog.get("source_document", {})
+            if not isinstance(source_document, dict):
+                source_document = {}
+
+            source_provider_name = str(
+                source_document.get(
+                    "provider_name",
+                    catalog.get("provider_name", ""),
+                )
+                or ""
+            ).strip()
+
             for concept in concepts:
                 if not isinstance(concept, dict):
                     raise TypeError(
@@ -1179,7 +1191,23 @@ class CotizacionesAnalysisExecutor:
                     continue
 
                 seen_concepts.add(identity)
-                collective_concepts.append(copy.deepcopy(concept))
+                concept_copy = copy.deepcopy(concept)
+                concept_metadata = concept_copy.get("metadata", {})
+                if not isinstance(concept_metadata, dict):
+                    concept_metadata = {}
+                if source_provider_name:
+                    concept_metadata.setdefault(
+                        "provider_name",
+                        source_provider_name,
+                    )
+                if concept_document_id:
+                    concept_metadata.setdefault(
+                        "document_id",
+                        concept_document_id,
+                    )
+                concept_copy["metadata"] = concept_metadata
+
+                collective_concepts.append(concept_copy)
 
         unique_document_ids = list(dict.fromkeys(document_ids))
         unique_catalog_ids = list(dict.fromkeys(catalog_ids))

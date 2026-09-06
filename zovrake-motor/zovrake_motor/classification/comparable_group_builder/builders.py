@@ -230,27 +230,208 @@ def _concept_type_from_relations(
     return "material"
 
 
+def _relation_pair(relation: EquivalenceRecord) -> tuple[str, str] | None:
+    """Retorna una clave de par estable para una relación binaria."""
+    if len(relation.involved_concept_ids) < 2:
+        return None
+    left = str(relation.involved_concept_ids[0]).strip()
+    right = str(relation.involved_concept_ids[1]).strip()
+    if not left or not right or left == right:
+        return None
+    return tuple(sorted((left, right)))
+
+
+def _source_provider_identity(
+    source: dict[str, Any],
+    concept_id: str,
+    *,
+    allow_document_fallback: bool,
+) -> str:
+    """
+    Resuelve una identidad de proveedor conservadora.
+
+    El nombre de proveedor es preferido y se normaliza únicamente en
+    espacios/capitalización. Si no existe, el document_id actúa como
+    aislamiento documental. Nunca se inventa un proveedor distinto.
+    """
+    provider_name = " ".join(
+        str(source.get("provider_name", "") or "").strip().casefold().split()
+    )
+    if provider_name:
+        return f"provider:{provider_name}"
+
+    if allow_document_fallback:
+        document_id = " ".join(
+            str(source.get("document_id", "") or "").strip().casefold().split()
+        )
+        if document_id:
+            return f"document:{document_id}"
+
+    return f"unknown:{concept_id}"
+
+
+def _concept_provider_map(
+    relations: tuple[EquivalenceRecord, ...],
+    *,
+    allow_document_fallback: bool,
+) -> dict[str, str]:
+    """Construye concepto -> proveedor desde la procedencia real del EDE."""
+    providers: dict[str, str] = {}
+
+    for relation in relations:
+        raw_map = relation.metadata.get("concept_source_map", {})
+        if not isinstance(raw_map, dict):
+            continue
+
+        for concept_id, source in raw_map.items():
+            concept_key = str(concept_id).strip()
+            if not concept_key or not isinstance(source, dict):
+                continue
+
+            identity = _source_provider_identity(
+                source,
+                concept_key,
+                allow_document_fallback=allow_document_fallback,
+            )
+            existing = providers.get(concept_key)
+
+            if existing is None:
+                providers[concept_key] = identity
+            elif existing != identity:
+                # La misma entidad conceptual no puede tener dos proveedores
+                # simultáneamente. Ante contradicción, se pierde la capacidad
+                # de atribuirla a un proveedor y se aísla el concepto.
+                providers[concept_key] = f"ambiguous:{concept_key}"
+
+    return providers
+
+
+def _relation_priority(relation: EquivalenceRecord) -> tuple[int, int, float, str]:
+    """Ordena primero evidencia fuerte y después similitud semántica."""
+    relation_rank = {
+        EquivalenceRelationType.EQUIVALENT.value: 2,
+        EquivalenceRelationType.COMPARABLE.value: 1,
+    }
+    evidence_rank = {
+        "high": 3,
+        "medium": 2,
+        "low": 1,
+    }
+    score = float(
+        relation.metadata.get(
+            "semantic_similarity_score",
+            0.0,
+        )
+        or 0.0
+    )
+    return (
+        relation_rank.get(str(relation.relation_type), 0),
+        evidence_rank.get(str(relation.evidence_level).casefold(), 0),
+        score,
+        str(relation.equivalence_id),
+    )
+
+
 def build_clusters_from_equivalences(
     catalog_view: EquivalenceCatalogView,
 ) -> dict[str, tuple[str, ...]]:
+    """
+    Construye grupos con dos salvaguardas explícitas:
+
+    1. un grupo no puede contener más de un concepto del mismo proveedor;
+    2. una unión nueva solo es válida cuando existe relación positiva directa
+       entre todos los pares que formarán el nuevo grupo.
+
+    La segunda regla evita que una relación transitiva débil cree falsos
+    grupos (A~B y B~C no basta para fusionar A/B/C cuando A~C no existe).
+    """
+    relations = tuple(catalog_view.comparable_relations)
     nodes: set[str] = set()
-    relations = catalog_view.comparable_relations
 
     for relation in relations:
-        nodes.update(relation.involved_concept_ids)
+        nodes.update(
+            str(concept_id).strip()
+            for concept_id in relation.involved_concept_ids
+            if str(concept_id).strip()
+        )
 
     if not nodes:
         return {}
 
-    union_find = _UnionFind(tuple(nodes))
+    relation_by_pair: dict[tuple[str, str], EquivalenceRecord] = {}
+
     for relation in relations:
-        if len(relation.involved_concept_ids) >= 2:
-            left, right = relation.involved_concept_ids[0], relation.involved_concept_ids[1]
-            union_find.union(left, right)
+        pair = _relation_pair(relation)
+        if pair is None:
+            continue
+        existing = relation_by_pair.get(pair)
+        if existing is None or _relation_priority(relation) > _relation_priority(existing):
+            relation_by_pair[pair] = relation
+
+    provider_by_concept = _concept_provider_map(
+        relations,
+        allow_document_fallback=len(catalog_view.document_ids) > 1,
+    )
+    union_find = _UnionFind(tuple(sorted(nodes)))
+    cluster_members: dict[str, set[str]] = {
+        concept_id: {concept_id}
+        for concept_id in sorted(nodes)
+    }
+    cluster_providers: dict[str, set[str]] = {
+        concept_id: {
+            provider_by_concept.get(
+                concept_id,
+                f"unknown:{concept_id}",
+            )
+        }
+        for concept_id in sorted(nodes)
+    }
+
+    def can_merge(left_root: str, right_root: str) -> bool:
+        left_members = cluster_members[left_root]
+        right_members = cluster_members[right_root]
+
+        if cluster_providers[left_root] & cluster_providers[right_root]:
+            return False
+
+        for left in left_members:
+            for right in right_members:
+                if tuple(sorted((left, right))) not in relation_by_pair:
+                    return False
+
+        return True
+
+    ordered_relations = sorted(
+        relation_by_pair.values(),
+        key=lambda relation: (
+            -_relation_priority(relation)[0],
+            -_relation_priority(relation)[1],
+            -_relation_priority(relation)[2],
+            _relation_priority(relation)[3],
+        ),
+    )
+
+    for relation in ordered_relations:
+        pair = _relation_pair(relation)
+        if pair is None:
+            continue
+
+        left_root = union_find.find(pair[0])
+        right_root = union_find.find(pair[1])
+
+        if left_root == right_root:
+            continue
+
+        if can_merge(left_root, right_root):
+            union_find.union(left_root, right_root)
+            cluster_members[left_root].update(cluster_members[right_root])
+            cluster_providers[left_root].update(cluster_providers[right_root])
+            cluster_members.pop(right_root, None)
+            cluster_providers.pop(right_root, None)
 
     return {
         root: tuple(sorted(members))
-        for root, members in union_find.clusters().items()
+        for root, members in cluster_members.items()
         if len(members) >= 1
     }
 
@@ -270,14 +451,31 @@ def build_comparable_group_record(
     document_ids: set[str] = set()
     specifications: set[str] = set()
 
+    concept_source_map = _concept_source_map_from_relations(
+        relations
+    )
+
     for relation in relations:
         equivalence_ids.add(relation.equivalence_id)
         concept_ids.update(relation.traceability.concept_ids)
         document_ids.update(relation.traceability.document_ids)
         if not relation.traceability.document_ids and relation.traceability.document_id:
             document_ids.add(relation.traceability.document_id)
-        if relation.traceability.document_reference:
-            provider_references.add(relation.traceability.document_reference)
+
+    for concept_id in normalized_concept_ids:
+        source = concept_source_map.get(str(concept_id), {})
+        if not isinstance(source, dict):
+            continue
+        provider_name = " ".join(
+            str(source.get("provider_name", "") or "").strip().split()
+        )
+        if provider_name:
+            provider_references.add(provider_name)
+            continue
+
+        document_id = str(source.get("document_id", "") or "").strip()
+        if document_id:
+            provider_references.add(document_id)
 
     sorted_document_ids = tuple(sorted(document_ids))
     primary_document_id = sorted_document_ids[0] if sorted_document_ids else catalog_view.document_id
@@ -285,9 +483,6 @@ def build_comparable_group_record(
     first_relation = relations[0]
 
     semantic_provenance = _semantic_group_provenance(
-        relations
-    )
-    concept_source_map = _concept_source_map_from_relations(
         relations
     )
 

@@ -292,6 +292,13 @@ def _concept_source_provenance(
         result[str(concept.normalized_concept_id)] = {
             "concept_id": str(concept.concept_id),
             "document_id": str(concept.traceability.document_id),
+            "provider_name": str(
+                metadata.get(
+                    "provider_name",
+                    "",
+                )
+                or ""
+            ),
             "document_reference": str(concept.traceability.document_reference),
             "source_record_id": str(concept.model_reference.source_record_id),
             "original_value": str(concept.original_value),

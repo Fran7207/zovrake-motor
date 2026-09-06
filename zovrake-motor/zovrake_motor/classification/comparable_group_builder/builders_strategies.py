@@ -54,10 +54,17 @@ class EquivalenceClusterGroupBuilder(ComparableGroupBuilderPort):
             if len(members) < settings.min_members_per_group:
                 continue
 
+            member_set = set(members)
             related: dict[str, EquivalenceRecord] = {}
             for member in members:
                 for relation in relations_by_concept.get(member, []):
-                    related[relation.equivalence_id] = relation
+                    relation_members = {
+                        str(concept_id).strip()
+                        for concept_id in relation.involved_concept_ids
+                        if str(concept_id).strip()
+                    }
+                    if relation_members and relation_members.issubset(member_set):
+                        related[relation.equivalence_id] = relation
 
             public_group_id = build_public_group_id(
                 sequence,
