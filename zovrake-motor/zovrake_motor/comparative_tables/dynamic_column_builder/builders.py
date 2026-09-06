@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from zovrake_motor.comparative_tables.attribute_semantics import canonicalize_attribute_name
 from zovrake_motor.comparative_tables.dynamic_column_builder.enums import ColumnDataType
 from zovrake_motor.comparative_tables.dynamic_column_builder.gateway import (
     StructureCatalogView,
@@ -50,9 +51,11 @@ def infer_data_type(value: Any) -> ColumnDataType:
 
 
 def _normalize_attribute_name(name: Any) -> str:
-    return " ".join(
-        str(name).strip().casefold().split()
-    )
+    return canonicalize_attribute_name(name).semantic_key.casefold()
+
+
+def _normalize_free_attribute_name(name: Any) -> str:
+    return " ".join(str(name).strip().casefold().split())
 
 
 def _semantic_fact_column_candidate(
@@ -113,8 +116,13 @@ def _semantic_fact_column_candidate(
         ),
     )
 
-    return (
+    semantic = canonicalize_attribute_name(
         label,
+        scope=str(fact.get("scope", "unknown") or "unknown"),
+    )
+
+    return (
+        semantic.display_name if semantic.matched_alias else label,
         "semantic",
         infer_data_type(value),
         value,
@@ -152,9 +160,8 @@ def extract_attribute_candidates(
     for name, value in sorted(
         commercial.items()
     ):
-        normalized = _normalize_attribute_name(
-            name
-        )
+        semantic = canonicalize_attribute_name(name, scope="document")
+        normalized = semantic.semantic_key.casefold()
 
         if (
             not normalized
@@ -162,13 +169,11 @@ def extract_attribute_candidates(
         ):
             continue
 
-        seen_names.add(
-            normalized
-        )
+        seen_names.add(normalized)
 
         candidates.append(
             (
-                str(name),
+                semantic.display_name if semantic.matched_alias else str(name),
                 "commercial",
                 infer_data_type(value),
                 value,
@@ -185,9 +190,8 @@ def extract_attribute_candidates(
     for name, value in sorted(
         technical.items()
     ):
-        normalized = _normalize_attribute_name(
-            name
-        )
+        semantic = canonicalize_attribute_name(name, scope="technical")
+        normalized = semantic.semantic_key.casefold()
 
         if (
             not normalized
@@ -195,13 +199,11 @@ def extract_attribute_candidates(
         ):
             continue
 
-        seen_names.add(
-            normalized
-        )
+        seen_names.add(normalized)
 
         candidates.append(
             (
-                str(name),
+                semantic.display_name if semantic.matched_alias else str(name),
                 "technical",
                 infer_data_type(value),
                 value,
@@ -222,7 +224,7 @@ def extract_attribute_candidates(
                 specification
             ).strip()
 
-            normalized = _normalize_attribute_name(
+            normalized = _normalize_free_attribute_name(
                 name
             )
 
@@ -253,7 +255,7 @@ def extract_attribute_candidates(
     ).strip()
 
     if primary_item:
-        normalized = _normalize_attribute_name(
+        normalized = _normalize_free_attribute_name(
             primary_item
         )
 
@@ -295,44 +297,32 @@ def extract_attribute_candidates(
             ("brand", "Marca"),
         )
 
-        def add_observed(
-            raw_name: Any,
-            value: Any,
-        ) -> None:
-            name = str(raw_name).strip()
-            if not name:
+        visible_by_normalized: dict[str, str] = {}
+
+        def add_observed(raw_name: Any, value: Any, *, scope: str = "item") -> None:
+            if value in (None, ""):
                 return
-            normalized = _normalize_attribute_name(name)
+            semantic = canonicalize_attribute_name(raw_name, scope=scope)
+            normalized = semantic.semantic_key.casefold()
             if not normalized or normalized in seen_names:
                 return
             if normalized not in observed_fields:
                 observed_fields[normalized] = value
-
-        visible_by_normalized: dict[str, str] = {}
+                visible_by_normalized[normalized] = (
+                    semantic.display_name if semantic.matched_alias else str(raw_name).strip()
+                )
 
         for source in concept_source_map.values():
             if not isinstance(source, dict):
                 continue
 
             for key, display_name in standard_item_fields:
-                value = source.get(key, "")
-                if value not in (None, ""):
-                    add_observed(display_name, value)
-                    visible_by_normalized.setdefault(
-                        _normalize_attribute_name(display_name),
-                        display_name,
-                    )
+                add_observed(display_name, source.get(key, ""), scope="item")
 
             raw_fields = source.get("fields", {})
             if isinstance(raw_fields, dict):
                 for key, value in raw_fields.items():
-                    if value in (None, ""):
-                        continue
-                    add_observed(key, value)
-                    visible_by_normalized.setdefault(
-                        _normalize_attribute_name(key),
-                        str(key).strip(),
-                    )
+                    add_observed(key, value, scope="item")
 
         for normalized_name, value in sorted(observed_fields.items()):
             if normalized_name in seen_names:
@@ -387,9 +377,11 @@ def extract_attribute_candidates(
 
                 name, source, data_type, reference_value = candidate
 
-                normalized = _normalize_attribute_name(
-                    name
+                semantic = canonicalize_attribute_name(
+                    name,
+                    scope=str(fact.get("scope", "unknown") or "unknown"),
                 )
+                normalized = semantic.semantic_key.casefold()
 
                 if (
                     not normalized
@@ -397,9 +389,7 @@ def extract_attribute_candidates(
                 ):
                     continue
 
-                seen_names.add(
-                    normalized
-                )
+                seen_names.add(normalized)
 
                 candidates.append(
                     (
@@ -539,6 +529,15 @@ def build_column_definition(
             "semantic_evidence_ids": semantic_evidence_ids
             if attribute_source == "semantic"
             else [],
+            "semantic_attribute_key": canonicalize_attribute_name(
+                attribute_name,
+                scope="item" if attribute_source == "source_item" else "unknown",
+            ).semantic_key,
+            "original_attribute_name": attribute_name,
+            "semantic_alias_matched": canonicalize_attribute_name(
+                attribute_name,
+                scope="item" if attribute_source == "source_item" else "unknown",
+            ).matched_alias,
         },
     )
 

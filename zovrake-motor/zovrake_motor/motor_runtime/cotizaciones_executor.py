@@ -6,6 +6,7 @@ import copy
 from typing import Any
 from uuid import UUID
 
+from zovrake_motor.comparative_tables.attribute_semantics import canonicalize_attribute_name
 from zovrake_motor.classification.comparable_group_builder.models import ComparableGroupBuildRequest
 from zovrake_motor.classification.comparative_domain_model.models import (
     ComparativeDomainModelBuildRequest,
@@ -2507,11 +2508,21 @@ class CotizacionesAnalysisExecutor:
                         "",
                     )
 
+                    column_metadata = {}
+                    column_id = str(cell_copy.get("column_id", ""))
+                    for column in columns:
+                        if str(column.get("column_id", "")) == column_id:
+                            raw_metadata = column.get("metadata", {})
+                            if isinstance(raw_metadata, dict):
+                                column_metadata = raw_metadata
+                            break
+
                     value = CotizacionesAnalysisExecutor._resolve_cell_value(
                         attribute=attr,
                         document=document,
                         provider_id=provider_id,
                         item=source_item,
+                        column_metadata=column_metadata,
                     )
 
                     if value:
@@ -2838,8 +2849,19 @@ class CotizacionesAnalysisExecutor:
         document: ResolvedDocumentContent | None,
         provider_id: str,
         item: dict[str, Any] | None = None,
+        column_metadata: dict[str, Any] | None = None,
     ) -> str:
-        if attribute in {"provider", "proveedor", "provider_name"}:
+        column_metadata = column_metadata if isinstance(column_metadata, dict) else {}
+        semantic_key = str(
+            column_metadata.get("semantic_attribute_key", "")
+        ).strip()
+        if not semantic_key:
+            semantic_key = canonicalize_attribute_name(
+                attribute,
+                scope="item" if item is not None else "unknown",
+            ).semantic_key
+
+        if semantic_key == "PROVIDER":
             return (
                 document.provider_name
                 if document
@@ -2849,60 +2871,52 @@ class CotizacionesAnalysisExecutor:
         if document is None:
             return ""
 
-        if attribute in {"currency", "moneda"}:
+        if semantic_key == "CURRENCY":
             return document.commercial_currency
 
-        if attribute in {"total", "total_amount", "monto", "importe"}:
-            return document.commercial_total_amount
-
-        if attribute in {"payment_terms", "pago", "condiciones"}:
-            return document.commercial_payment_terms
-
-        if attribute in {"document", "documento", "file_name"}:
-            return document.file_name or document.document_label
-
+        # En una tabla por ítem, TOTAL significa total de la línea. Primero
+        # consultamos el ítem para no devolver accidentalmente el total global.
         if item is not None:
-            normalized_attribute = str(attribute).strip().casefold()
-            direct_aliases = {
-                "quantity": "quantity",
-                "cantidad": "quantity",
-                "unit": "unit",
-                "unidad": "unit",
-                "unit_price": "unit_price",
-                "precio": "unit_price",
-                "precio_unitario": "unit_price",
-                "description": "description",
-                "descripcion": "description",
-                "item": "description",
+            item_key_by_semantic = {
+                "DESCRIPTION": "description",
+                "QUANTITY": "quantity",
+                "UNIT": "unit",
+                "UNIT_PRICE": "unit_price",
+                "LINE_TOTAL": "total",
+                "CODE": "code",
+                "BRAND": "brand",
             }
 
-            item_key = direct_aliases.get(
-                normalized_attribute
-            )
-
+            item_key = item_key_by_semantic.get(semantic_key)
             if item_key is not None:
-                value = item.get(
-                    item_key,
-                    "",
-                )
+                value = item.get(item_key, "")
                 if value not in (None, ""):
                     return str(value)
 
-            fields = item.get(
-                "fields",
-                {},
-            )
+            fields = item.get("fields", {})
             if isinstance(fields, dict):
-                normalized_fields = {
-                    str(key).strip().casefold(): value
-                    for key, value in fields.items()
-                }
-                value = normalized_fields.get(
-                    normalized_attribute,
-                    "",
-                )
-                if value not in (None, ""):
-                    return str(value)
+                for key, value in fields.items():
+                    field_semantic = canonicalize_attribute_name(key, scope="item")
+                    if field_semantic.semantic_key == semantic_key and value not in (None, ""):
+                        return str(value)
+
+        if semantic_key == "DOCUMENT_TOTAL":
+            return document.commercial_total_amount
+
+        if semantic_key == "PAYMENT_TERMS":
+            return document.commercial_payment_terms
+
+        if semantic_key == "DOCUMENT":
+            return document.file_name or document.document_label
+
+        # Compatibilidad con atributos libres que no tienen alias conocido.
+        attribute_normalized = str(attribute).strip().casefold()
+        if item is not None:
+            fields = item.get("fields", {})
+            if isinstance(fields, dict):
+                for key, value in fields.items():
+                    if str(key).strip().casefold() == attribute_normalized and value not in (None, ""):
+                        return str(value)
 
         return ""
 
