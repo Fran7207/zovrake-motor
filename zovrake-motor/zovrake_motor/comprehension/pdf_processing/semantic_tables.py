@@ -1055,6 +1055,23 @@ class PdfSemanticTableAnalyzer:
                 "conditions_structure_dominant"
             )
 
+        commercial_row_count = sum(
+            1
+            for row in rows
+            if cls._is_semantically_commercial_row(row)
+        )
+
+        # Nunca declaramos una tabla como comercial únicamente por sus
+        # encabezados. Si ninguna fila contiene evidencia de una partida
+        # comercial, el encabezado puede provenir de una maquetación mixta
+        # o de una extracción/layout defectuoso. En ese caso la tabla no
+        # debe alimentar items[].
+        if commercial_row_count == 0:
+            role_scores["commercial_items"] = 0.0
+            role_evidence["commercial_items"].append(
+                "reason:no_commercial_rows"
+            )
+
         ranked = sorted(
             (
                 (role, score)

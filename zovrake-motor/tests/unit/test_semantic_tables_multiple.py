@@ -182,3 +182,74 @@ def test_physical_analysis_filters_administrative_rows_after_table_role_classifi
             "total": "160.00",
         },
     )
+
+
+def test_table_with_only_administrative_rows_is_not_commercial():
+    analyzer = PdfSemanticTableAnalyzer()
+
+    table = type(
+        "PdfTableStub",
+        (),
+        {
+            "table_id": "admin-only",
+            "page_number": 1,
+            "rows": (
+                ("DESCRIPCIÓN", "CANT.", "PRECIO", "UNIDAD"),
+                ("Razón Social", "INVERSIONES EVZA S.R.L.", "Cotización N°", "07081-2026"),
+                ("Cliente", "00000", "RUC", "20571395283"),
+                ("Dirección", "JR. LEONCIO PRADO", "Fecha", "2026-02-19"),
+                ("Subtotal:", "367.80", "IGV 18%:", "66.20"),
+            ),
+        },
+    )()
+
+    semantic = analyzer.analyze(table)
+    assert semantic is not None
+    assert semantic.table_role != "commercial_items"
+
+
+def test_text_fallback_never_invents_static_quote_columns():
+    from zovrake_motor.motor_runtime.document_content import _extract_tables_from_text
+
+    tables = _extract_tables_from_text(
+        "Empresa XYZ\n"
+        "Producto A  10  25.00\n"
+        "Producto B  5   30.00\n"
+    )
+
+    assert tables
+    assert tables[0]["header_inferred"] is False
+    assert tables[0]["header_detected"] is False
+    assert tables[0]["rows"][0] != (
+        "Descripción",
+        "Cantidad",
+        "Precio",
+        "Unidad",
+    )
+
+
+def test_semantic_table_item_projection_requires_commercial_role():
+    from zovrake_motor.motor_runtime.document_content import _semantic_tables_to_items
+
+    tables = (
+        {
+            "table_id": "identity-table",
+            "table_role": "identity",
+            "columns": [
+                {"key": "description"},
+                {"key": "quantity"},
+                {"key": "unit_price"},
+                {"key": "unit"},
+            ],
+            "rows": [
+                {
+                    "description": "Razón Social",
+                    "quantity": "EMPRESA XYZ",
+                    "unit_price": "RUC",
+                    "unit": "20123456789",
+                }
+            ],
+        },
+    )
+
+    assert _semantic_tables_to_items(tables) == ()

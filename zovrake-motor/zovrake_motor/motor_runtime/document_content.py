@@ -2090,16 +2090,11 @@ def _semantic_tables_to_items(
         has_unit = "unit" in column_keys
         has_total = "total" in column_keys
 
-        if table_role and table_role != "commercial_items":
-            if not (
-                has_description
-                and (
-                    has_quantity
-                    or has_unit_price
-                    or has_total
-                )
-            ):
-                continue
+        # La proyección de partidas es una frontera semántica estricta:
+        # una tabla de identidad, condiciones, banca o finanzas nunca se
+        # convierte en items aunque comparta nombres de columnas.
+        if table_role != "commercial_items":
+            continue
 
         if not has_description:
             continue
@@ -2531,23 +2526,22 @@ def _extract_tables_from_text(
     if not rows:
         return ()
 
-    if not _looks_like_header(
+    header_detected = _looks_like_header(
         " ".join(rows[0])
-    ):
-        rows = [
-            (
-                "Descripción",
-                "Cantidad",
-                "Precio",
-                "Unidad",
-            ),
-            *rows,
-        ]
+    )
 
     return (
         {
             "table_id": "table-text-1",
             "rows": rows,
+            "table_role": (
+                "unknown"
+                if not header_detected
+                else "unclassified_text_table"
+            ),
+            "header_detected": header_detected,
+            "header_inferred": False,
+            "source_kind": "text_fallback",
         },
     )
 
