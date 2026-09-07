@@ -7,6 +7,45 @@ from typing import Any
 
 
 @dataclass(frozen=True)
+class PdfStructuralObject:
+    """Elemento estructural del PDF conservado sin interpretación de negocio.
+
+    Permite transportar objetos que no son texto/tablas/imágenes simples,
+    como anotaciones, formularios, adjuntos, marcadores, recursos y
+    primitivas vectoriales.
+    """
+
+    object_id: str
+    object_type: str
+    page_number: int | None = None
+    subtype: str = ""
+    name: str = ""
+    text: str = ""
+    bbox: tuple[float, float, float, float] | None = None
+    byte_size: int = 0
+    content_sha256: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "object_id": self.object_id,
+            "object_type": self.object_type,
+            "page_number": self.page_number,
+            "subtype": self.subtype,
+            "name": self.name,
+            "text": self.text,
+            "bbox": (
+                list(self.bbox)
+                if self.bbox is not None
+                else None
+            ),
+            "byte_size": self.byte_size,
+            "content_sha256": self.content_sha256,
+            "metadata": self.metadata,
+        }
+
+
+@dataclass(frozen=True)
 class PdfImage:
     """Imagen detectada dentro de una página PDF."""
 
@@ -16,6 +55,12 @@ class PdfImage:
     height: int | None = None
     image_format: str = ""
     byte_size: int = 0
+    bbox: tuple[float, float, float, float] | None = None
+    content_sha256: str = ""
+    ocr_attempted: bool = False
+    ocr_text: str = ""
+    ocr_confidence: float = 0.0
+    ocr_blocks: tuple[dict[str, Any], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -25,6 +70,16 @@ class PdfImage:
             "height": self.height,
             "image_format": self.image_format,
             "byte_size": self.byte_size,
+            "bbox": (
+                list(self.bbox)
+                if self.bbox is not None
+                else None
+            ),
+            "content_sha256": self.content_sha256,
+            "ocr_attempted": self.ocr_attempted,
+            "ocr_text": self.ocr_text,
+            "ocr_confidence": self.ocr_confidence,
+            "ocr_blocks": list(self.ocr_blocks),
         }
 
 
@@ -287,7 +342,9 @@ class ProcessedPdfDocument:
     tables: tuple[PdfTable, ...]
     semantic_tables: tuple[PdfSemanticTable, ...] = ()
     images: tuple[PdfImage, ...] = ()
+    structural_objects: tuple[PdfStructuralObject, ...] = ()
     pdf_metadata: dict[str, Any] = field(default_factory=dict)
+    coverage: dict[str, Any] = field(default_factory=dict)
 
     # Estado global de OCR.
     ocr_required: bool = False
@@ -344,7 +401,12 @@ class ProcessedPdfDocument:
                 image.to_dict()
                 for image in self.images
             ],
+            "structural_objects": [
+                item.to_dict()
+                for item in self.structural_objects
+            ],
             "pdf_metadata": self.pdf_metadata,
+            "coverage": self.coverage,
             "ocr_required": self.ocr_required,
             "ocr_executed": self.ocr_executed,
             "ocr_pages_executed": list(

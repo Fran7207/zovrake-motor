@@ -2,6 +2,7 @@
 
 from zovrake_motor.comprehension.pdf_processing.models import (
     PdfImage,
+    PdfStructuralObject,
     PdfPageAnalysis,
     PdfTable,
     PdfTextBlock,
@@ -14,6 +15,7 @@ from zovrake_motor.comprehension.pdf_processing.processor import (
 __all__ = [
     "PDFDocumentProcessor",
     "PdfImage",
+    "PdfStructuralObject",
     "PdfPageAnalysis",
     "PdfTable",
     "PdfTextBlock",

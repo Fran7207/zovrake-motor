@@ -181,6 +181,30 @@ class OcrProcessor:
             r"C:\Program Files\Tesseract-OCR\tesseract.exe"
         )
 
+    def process_image_bytes(
+        self,
+        *,
+        image_bytes: bytes,
+        page_number: int,
+    ) -> OcrPageResult:
+        """Ejecuta OCR directamente sobre una imagen embebida del PDF."""
+        if not image_bytes:
+            raise ValueError("No se proporcionaron datos de imagen.")
+
+        image = Image.open(BytesIO(image_bytes))
+        converted = None
+        try:
+            image.load()
+            converted = image.convert("RGB")
+            return self._run_ocr(
+                image=converted,
+                page_number=page_number,
+            )
+        finally:
+            if converted is not None:
+                converted.close()
+            image.close()
+
     def _run_ocr(
         self,
         *,

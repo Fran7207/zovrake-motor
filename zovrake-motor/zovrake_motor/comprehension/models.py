@@ -194,6 +194,7 @@ class DocumentKnowledge:
     visual_text: str = ""
     tables: tuple[dict[str, Any], ...] = ()
     images: tuple[dict[str, Any], ...] = ()
+    structural_objects: tuple[dict[str, Any], ...] = ()
     ocr_blocks: tuple[dict[str, Any], ...] = ()
 
     # Comprensión semántica.
@@ -260,6 +261,7 @@ class DocumentKnowledge:
             "visual_text": self.visual_text,
             "tables": list(self.tables),
             "images": list(self.images),
+            "structural_objects": list(self.structural_objects),
             "ocr_blocks": list(self.ocr_blocks),
             "sections": list(self.sections),
             "entities": [

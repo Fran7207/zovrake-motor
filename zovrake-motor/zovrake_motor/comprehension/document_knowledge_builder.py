@@ -87,6 +87,35 @@ class DocumentKnowledgeBuilder:
                     }
                 )
 
+        # ---------------------------------------------------------
+        # Objetos estructurales globales y de página.
+        # ---------------------------------------------------------
+        for item in document.structural_objects:
+            region_id = self._stable_id(
+                item.page_number or 0,
+                "structural",
+                item.object_id,
+            )
+
+            region = DocumentRegion(
+                region_id=region_id,
+                page_number=item.page_number or 1,
+                region_type="structural_object",
+                bbox=item.bbox,
+                content=item.text,
+                source_kind="pdf_structure",
+                confidence=1.0,
+                metadata=item.to_dict(),
+            )
+
+            regions.append(region)
+            evidence.append(
+                self._evidence_for_region(
+                    region,
+                    source_id=item.object_id,
+                )
+            )
+
         page_coverage = (
             sum(
                 1
@@ -138,6 +167,13 @@ class DocumentKnowledgeBuilder:
                 "source_images_count": (
                     len(document.images)
                 ),
+                "source_structural_objects_count": (
+                    len(document.structural_objects)
+                ),
+                "source_structural_object_counts": self._count_structural_objects(
+                    document.structural_objects
+                ),
+                "source_coverage": dict(document.coverage),
                 "source_ocr_required": (
                     document.ocr_required
                 ),
@@ -183,6 +219,10 @@ class DocumentKnowledgeBuilder:
             images=tuple(
                 image.to_dict()
                 for image in document.images
+            ),
+            structural_objects=tuple(
+                item.to_dict()
+                for item in document.structural_objects
             ),
             ocr_blocks=tuple(
                 block.to_dict()
@@ -410,7 +450,47 @@ class DocumentKnowledgeBuilder:
             )
 
         # ---------------------------------------------------------
-        # 5. OCR.
+        # 5. OCR directo sobre imágenes embebidas.
+        # ---------------------------------------------------------
+        for index, image in enumerate(
+            page.images,
+            start=1,
+        ):
+            if not image.ocr_text.strip():
+                continue
+
+            region_id = self._stable_id(
+                page.page_number,
+                "image_ocr",
+                image.image_id,
+                index,
+            )
+
+            region = DocumentRegion(
+                region_id=region_id,
+                page_number=page.page_number,
+                region_type="image_ocr",
+                bbox=image.bbox,
+                content=image.ocr_text,
+                source_kind="embedded_image_ocr",
+                confidence=image.ocr_confidence,
+                metadata={
+                    "image_id": image.image_id,
+                    "content_sha256": image.content_sha256,
+                    "ocr_block_count": len(image.ocr_blocks),
+                },
+            )
+
+            regions.append(region)
+            evidence.append(
+                self._evidence_for_region(
+                    region,
+                    source_id=image.image_id,
+                )
+            )
+
+        # ---------------------------------------------------------
+        # 6. OCR de página completa.
         #
         # El OCR se conserva separado del texto nativo.
         # ---------------------------------------------------------
@@ -461,6 +541,17 @@ class DocumentKnowledgeBuilder:
             )
 
         return regions, evidence
+
+    @staticmethod
+    def _count_structural_objects(items: tuple[Any, ...]) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for item in items:
+            object_type = str(
+                getattr(item, "object_type", "unknown")
+                or "unknown"
+            )
+            counts[object_type] = counts.get(object_type, 0) + 1
+        return counts
 
     @staticmethod
     def _evidence_for_region(

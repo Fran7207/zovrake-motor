@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from hashlib import sha256
 from io import BytesIO
 from typing import Any
 
@@ -15,6 +16,7 @@ from zovrake_motor.comprehension.pdf_processing.exceptions import (
 )
 from zovrake_motor.comprehension.pdf_processing.models import (
     PdfImage,
+    PdfStructuralObject,
     PdfOcrBlock,
     PdfPageAnalysis,
     PdfSemanticTable,
@@ -54,10 +56,12 @@ class PDFDocumentProcessor:
         ocr_processor: OcrProcessor | None = None,
         ocr_visual_pages: bool = True,
         ocr_all_pages: bool = False,
+        ocr_embedded_images: bool = False,
     ) -> None:
         self._ocr_processor = ocr_processor or OcrProcessor()
         self._ocr_visual_pages = bool(ocr_visual_pages)
         self._ocr_all_pages = bool(ocr_all_pages)
+        self._ocr_embedded_images = bool(ocr_embedded_images)
 
     def process(
         self,
@@ -111,6 +115,7 @@ class PDFDocumentProcessor:
         all_tables: list[PdfTable] = []
         all_semantic_tables: list[PdfSemanticTable] = []
         all_images: list[PdfImage] = []
+        all_structural_objects: list[PdfStructuralObject] = []
         full_text_parts: list[str] = []
         document_warnings: list[str] = []
         document_errors: list[str] = []
@@ -146,6 +151,14 @@ class PDFDocumentProcessor:
                 all_tables.extend(page_result.tables)
                 all_semantic_tables.extend(page_result.semantic_tables)
                 all_images.extend(page_result.images)
+                all_structural_objects.extend(
+                    self._extract_page_structural_objects(
+                        page_number=page_number,
+                        reader_page=reader.pages[index],
+                        plumber_page=plumber_pdf.pages[index],
+                        warnings=document_warnings,
+                    )
+                )
 
                 if page_result.text.strip():
                     full_text_parts.append(
@@ -204,6 +217,25 @@ class PDFDocumentProcessor:
                     )
                 )
 
+                # Aunque falle una etapa de comprensión de la página,
+                # intentamos conservar su estructura física de forma
+                # independiente para no perder evidencia documental.
+                try:
+                    all_structural_objects.extend(
+                        self._extract_page_structural_objects(
+                            page_number=page_number,
+                            reader_page=reader.pages[index],
+                            plumber_page=plumber_pdf.pages[index],
+                            warnings=document_warnings,
+                        )
+                    )
+                except Exception as structural_exc:
+                    document_warnings.append(
+                        f"Página {page_number}: tampoco fue posible "
+                        f"inventariar la estructura tras el fallo principal: "
+                        f"{structural_exc}"
+                    )
+
         full_text = "\n\n".join(
             part
             for part in full_text_parts
@@ -213,6 +245,13 @@ class PDFDocumentProcessor:
         ocr_required = any(
             page.requires_ocr
             for page in pages
+        )
+
+        all_structural_objects.extend(
+            self._extract_document_structural_objects(
+                reader=reader,
+                warnings=document_warnings,
+            )
         )
 
         metadata = self._extract_pdf_metadata(reader)
@@ -292,7 +331,14 @@ class PDFDocumentProcessor:
             tables=tuple(all_tables),
             semantic_tables=tuple(all_semantic_tables),
             images=tuple(all_images),
+            structural_objects=tuple(all_structural_objects),
             pdf_metadata=metadata,
+            coverage=self._build_coverage_report(
+                pages=pages,
+                images=all_images,
+                structural_objects=all_structural_objects,
+                document_errors=document_errors,
+            ),
             ocr_required=ocr_required,
             ocr_executed=ocr_executed,
             ocr_pages_executed=ocr_pages_executed,
@@ -1274,14 +1320,26 @@ class PDFDocumentProcessor:
 
         return tables
 
-    @staticmethod
     def _extract_images(
+        self,
         page_number: int,
         reader_page: Any,
         plumber_page: pdfplumber.page.Page,
         warnings: list[str],
     ) -> list[PdfImage]:
         images: list[PdfImage] = []
+
+        plumber_by_name: dict[str, dict[str, Any]] = {}
+        try:
+            for image in getattr(plumber_page, "images", ()) or ():
+                name = str(image.get("name") or "").strip()
+                if name:
+                    plumber_by_name[name] = image
+        except Exception as exc:
+            warnings.append(
+                f"No se pudo construir el índice geométrico de imágenes de "
+                f"la página {page_number}: {exc}"
+            )
 
         try:
             page_images = getattr(
@@ -1291,24 +1349,7 @@ class PDFDocumentProcessor:
             )
 
             for index, image in enumerate(page_images):
-                data = getattr(
-                    image,
-                    "data",
-                    b"",
-                ) or b""
-
-                width = getattr(
-                    image,
-                    "width",
-                    None,
-                )
-
-                height = getattr(
-                    image,
-                    "height",
-                    None,
-                )
-
+                data = getattr(image, "data", b"") or b""
                 name = str(
                     getattr(
                         image,
@@ -1316,12 +1357,75 @@ class PDFDocumentProcessor:
                         f"image-{index + 1}",
                     )
                 )
+                base_name = name.rsplit(".", 1)[0]
+
+                image_obj = getattr(image, "image", None)
+                width = getattr(image_obj, "width", None)
+                height = getattr(image_obj, "height", None)
+                image_format = str(
+                    getattr(image_obj, "format", "") or ""
+                )
+
+                source_geometry = (
+                    plumber_by_name.get(base_name)
+                    or plumber_by_name.get(name)
+                )
+
+                bbox = None
+                if source_geometry is not None:
+                    try:
+                        bbox = tuple(
+                            float(source_geometry[key])
+                            for key in (
+                                "x0",
+                                "top",
+                                "x1",
+                                "bottom",
+                            )
+                        )
+                    except Exception:
+                        bbox = None
+
+                content_sha256 = (
+                    sha256(data).hexdigest()
+                    if data
+                    else ""
+                )
+
+                ocr_attempted = False
+                ocr_text = ""
+                ocr_confidence = 0.0
+                ocr_blocks: tuple[dict[str, Any], ...] = ()
+
+                if data and self._ocr_embedded_images:
+                    ocr_attempted = True
+                    try:
+                        ocr_result = self._ocr_processor.process_image_bytes(
+                            image_bytes=data,
+                            page_number=page_number,
+                        )
+                        ocr_text = ocr_result.text
+                        ocr_confidence = ocr_result.confidence
+                        ocr_blocks = tuple(
+                            {
+                                "text": block.text,
+                                "bbox": list(block.bbox),
+                                "confidence": block.confidence,
+                                "source": "embedded_image_ocr",
+                                "coordinate_space": "image",
+                            }
+                            for block in ocr_result.blocks
+                        )
+                    except Exception as exc:
+                        warnings.append(
+                            f"Página {page_number}, imagen '{name}': "
+                            f"no pudo ejecutarse OCR directo sobre la imagen: {exc}"
+                        )
 
                 images.append(
                     PdfImage(
                         image_id=(
-                            f"page-{page_number}-"
-                            f"{name}"
+                            f"page-{page_number}-{name}"
                         ),
                         page_number=page_number,
                         width=(
@@ -1334,18 +1438,26 @@ class PDFDocumentProcessor:
                             if height is not None
                             else None
                         ),
-                        image_format="",
+                        image_format=image_format,
                         byte_size=len(data),
+                        bbox=bbox,
+                        content_sha256=content_sha256,
+                        ocr_attempted=ocr_attempted,
+                        ocr_text=ocr_text,
+                        ocr_confidence=ocr_confidence,
+                        ocr_blocks=ocr_blocks,
                     )
                 )
 
         except Exception as exc:
             warnings.append(
-                f"No se pudieron inspeccionar las imágenes: {exc}"
+                f"No se pudieron inspeccionar las imágenes de la página "
+                f"{page_number}: {exc}"
             )
 
-        # pdfplumber permite detectar imágenes aunque pypdf
-        # no haya podido exponerlas como objetos de imagen.
+        # pdfplumber permite detectar imágenes aunque pypdf no haya podido
+        # exponerlas como objetos de imagen. Se conserva la detección para
+        # que la cobertura física nunca dependa de un único extractor.
         try:
             plumber_images = getattr(
                 plumber_page,
@@ -1353,37 +1465,468 @@ class PDFDocumentProcessor:
                 (),
             )
 
-            if plumber_images and not images:
-                for index, image in enumerate(
-                    plumber_images
-                ):
-                    images.append(
-                        PdfImage(
-                            image_id=(
-                                f"page-{page_number}-"
-                                f"detected-image-{index + 1}"
-                            ),
-                            page_number=page_number,
-                            width=(
-                                int(image["width"])
-                                if image.get("width")
-                                else None
-                            ),
-                            height=(
-                                int(image["height"])
-                                if image.get("height")
-                                else None
-                            ),
+            known_ids = {image.image_id for image in images}
+            for index, image in enumerate(plumber_images or ()):
+                name = str(
+                    image.get("name")
+                    or f"detected-image-{index + 1}"
+                )
+                image_id = (
+                    f"page-{page_number}-"
+                    f"{name}"
+                )
+
+                if image_id in known_ids:
+                    continue
+
+                bbox = None
+                try:
+                    bbox = tuple(
+                        float(image[key])
+                        for key in (
+                            "x0",
+                            "top",
+                            "x1",
+                            "bottom",
                         )
                     )
+                except Exception:
+                    bbox = None
+
+                images.append(
+                    PdfImage(
+                        image_id=image_id,
+                        page_number=page_number,
+                        width=(
+                            int(image["srcsize"][0])
+                            if image.get("srcsize")
+                            else None
+                        ),
+                        height=(
+                            int(image["srcsize"][1])
+                            if image.get("srcsize")
+                            else None
+                        ),
+                        bbox=bbox,
+                    )
+                )
 
         except Exception as exc:
             warnings.append(
-                f"No se pudieron inspeccionar "
-                f"elementos visuales: {exc}"
+                f"No se pudieron inspeccionar elementos visuales "
+                f"de la página {page_number}: {exc}"
             )
 
         return images
+
+    def _extract_page_structural_objects(
+        self,
+        *,
+        page_number: int,
+        reader_page: Any,
+        plumber_page: pdfplumber.page.Page,
+        warnings: list[str],
+    ) -> list[PdfStructuralObject]:
+        """Captura estructura PDF que no cabe en texto/tablas/imágenes."""
+        objects: list[PdfStructuralObject] = []
+
+        page_keys = tuple(
+            sorted(
+                str(key).lstrip("/")
+                for key in getattr(reader_page, "keys", lambda: ())()
+            )
+        )
+
+        objects.append(
+            PdfStructuralObject(
+                object_id=f"page-{page_number}-structure",
+                object_type="page_structure",
+                page_number=page_number,
+                metadata={
+                    "dictionary_keys": list(page_keys),
+                    "rotation": int(
+                        getattr(reader_page, "rotation", 0) or 0
+                    ),
+                    "mediabox": self._safe_box(reader_page.get("/MediaBox")),
+                    "cropbox": self._safe_box(reader_page.get("/CropBox")),
+                },
+            )
+        )
+
+        try:
+            contents = reader_page.get_contents()
+            if contents is not None:
+                raw = contents.get_data()
+                objects.append(
+                    PdfStructuralObject(
+                        object_id=f"page-{page_number}-content-stream",
+                        object_type="content_stream",
+                        page_number=page_number,
+                        byte_size=len(raw),
+                        content_sha256=sha256(raw).hexdigest(),
+                        metadata={
+                            "stream_present": True,
+                        },
+                    )
+                )
+        except Exception as exc:
+            warnings.append(
+                f"Página {page_number}: no se pudo inventariar el content stream: {exc}"
+            )
+
+        try:
+            resources = reader_page.get("/Resources")
+            if resources is not None:
+                resource_keys = tuple(
+                    sorted(
+                        str(key).lstrip("/")
+                        for key in resources.keys()
+                    )
+                )
+                xobjects = resources.get("/XObject") or {}
+                xobject_summary = []
+                try:
+                    for key, value in xobjects.items():
+                        resolved = value.get_object()
+                        xobject_summary.append(
+                            {
+                                "name": str(key),
+                                "subtype": str(
+                                    resolved.get("/Subtype", "")
+                                ).lstrip("/"),
+                                "width": resolved.get("/Width"),
+                                "height": resolved.get("/Height"),
+                            }
+                        )
+                except Exception as exc:
+                    warnings.append(
+                        f"Página {page_number}: no se pudo inspeccionar XObject: {exc}"
+                    )
+
+                objects.append(
+                    PdfStructuralObject(
+                        object_id=f"page-{page_number}-resources",
+                        object_type="resources",
+                        page_number=page_number,
+                        metadata={
+                            "resource_keys": list(resource_keys),
+                            "xobjects": xobject_summary,
+                        },
+                    )
+                )
+        except Exception as exc:
+            warnings.append(
+                f"Página {page_number}: no se pudieron inspeccionar recursos: {exc}"
+            )
+
+        # Anotaciones y enlaces.
+        try:
+            annotations = reader_page.get("/Annots") or []
+            for index, annotation_ref in enumerate(annotations):
+                annotation = annotation_ref.get_object()
+                subtype = str(
+                    annotation.get("/Subtype", "")
+                ).lstrip("/")
+                action = annotation.get("/A")
+                uri = ""
+                if action is not None:
+                    uri = str(action.get("/URI", "") or "")
+
+                objects.append(
+                    PdfStructuralObject(
+                        object_id=f"page-{page_number}-annotation-{index + 1}",
+                        object_type="annotation",
+                        page_number=page_number,
+                        subtype=subtype,
+                        text=str(
+                            annotation.get("/Contents", "") or ""
+                        ),
+                        bbox=self._safe_box(annotation.get("/Rect")),
+                        metadata={
+                            "flags": self._safe_pdf_value(annotation.get("/F")),
+                            "uri": uri,
+                            "destination": self._safe_pdf_value(
+                                annotation.get("/Dest")
+                            ),
+                            "field_name": str(
+                                annotation.get("/T", "") or ""
+                            ),
+                        },
+                    )
+                )
+        except Exception as exc:
+            warnings.append(
+                f"Página {page_number}: no se pudieron inspeccionar anotaciones: {exc}"
+            )
+
+        # Geometría vectorial que pdfplumber puede reconstruir.
+        for kind, attr in (
+            ("vector_line", "lines"),
+            ("vector_rect", "rects"),
+            ("vector_curve", "curves"),
+        ):
+            try:
+                elements = getattr(plumber_page, attr, ()) or ()
+                for index, element in enumerate(elements):
+                    bbox = self._safe_geometry_box(element)
+                    metadata = {
+                        key: self._json_safe(value)
+                        for key, value in element.items()
+                        if key not in {"object_type"}
+                    }
+                    objects.append(
+                        PdfStructuralObject(
+                            object_id=(
+                                f"page-{page_number}-{kind}-{index + 1}"
+                            ),
+                            object_type=kind,
+                            page_number=page_number,
+                            bbox=bbox,
+                            metadata=metadata,
+                        )
+                    )
+            except Exception as exc:
+                warnings.append(
+                    f"Página {page_number}: no se pudieron inspeccionar {attr}: {exc}"
+                )
+
+        return objects
+
+    def _extract_document_structural_objects(
+        self,
+        *,
+        reader: PdfReader,
+        warnings: list[str],
+    ) -> list[PdfStructuralObject]:
+        objects: list[PdfStructuralObject] = []
+
+        # Campos AcroForm.
+        try:
+            fields = reader.get_fields() or {}
+            for index, (name, field_obj) in enumerate(fields.items(), start=1):
+                field_data = field_obj or {}
+                objects.append(
+                    PdfStructuralObject(
+                        object_id=f"form-field-{index}",
+                        object_type="form_field",
+                        name=str(name),
+                        subtype=str(field_data.get("/FT", "")).lstrip("/"),
+                        text=str(field_data.get("/V", "") or ""),
+                        metadata={
+                            "tooltip": str(field_data.get("/TU", "") or ""),
+                            "mapping_name": str(field_data.get("/TM", "") or ""),
+                            "flags": self._safe_pdf_value(field_data.get("/Ff")),
+                        },
+                    )
+                )
+        except Exception as exc:
+            warnings.append(
+                f"No se pudieron inspeccionar campos de formulario: {exc}"
+            )
+
+        # Adjuntos embebidos.
+        try:
+            attachments = getattr(reader, "attachments", None)
+            if attachments:
+                for index, (name, data) in enumerate(attachments.items(), start=1):
+                    values = data if isinstance(data, (list, tuple)) else [data]
+                    for occurrence, payload in enumerate(values, start=1):
+                        payload_bytes = bytes(payload or b"")
+                        objects.append(
+                            PdfStructuralObject(
+                                object_id=f"attachment-{index}-{occurrence}",
+                                object_type="embedded_attachment",
+                                name=str(name),
+                                byte_size=len(payload_bytes),
+                                content_sha256=(
+                                    sha256(payload_bytes).hexdigest()
+                                    if payload_bytes
+                                    else ""
+                                ),
+                                metadata={
+                                    "occurrence": occurrence,
+                                },
+                            )
+                        )
+        except Exception as exc:
+            warnings.append(
+                f"No se pudieron inspeccionar adjuntos embebidos: {exc}"
+            )
+
+        # Marcadores / outline.
+        try:
+            outline = getattr(reader, "outline", ()) or ()
+            counter = [0]
+
+            def walk(entries: Any, parent_id: str = "") -> None:
+                for entry in entries:
+                    if isinstance(entry, list):
+                        walk(entry, parent_id)
+                        continue
+                    counter[0] += 1
+                    title = str(
+                        getattr(entry, "title", None)
+                        or getattr(entry, "get", lambda *_: "")("/Title", "")
+                        or entry
+                    )
+                    objects.append(
+                        PdfStructuralObject(
+                            object_id=f"outline-{counter[0]}",
+                            object_type="outline",
+                            text=title,
+                            metadata={
+                                "parent_outline_id": parent_id,
+                            },
+                        )
+                    )
+                    current = f"outline-{counter[0]}"
+                    children = getattr(entry, "children", None)
+                    if callable(children):
+                        try:
+                            walk(list(children()), current)
+                        except Exception:
+                            pass
+
+            walk(outline)
+        except Exception as exc:
+            warnings.append(
+                f"No se pudieron inspeccionar marcadores del PDF: {exc}"
+            )
+
+        # Etiquetas de página, versión e indicios globales.
+        try:
+            page_labels = getattr(reader, "page_labels", None)
+            if page_labels:
+                objects.append(
+                    PdfStructuralObject(
+                        object_id="document-page-labels",
+                        object_type="page_labels",
+                        metadata={
+                            "labels": [str(label) for label in page_labels],
+                        },
+                    )
+                )
+        except Exception as exc:
+            warnings.append(
+                f"No se pudieron inspeccionar etiquetas de página: {exc}"
+            )
+
+        try:
+            header = getattr(reader, "pdf_header", "")
+            objects.append(
+                PdfStructuralObject(
+                    object_id="document-structure",
+                    object_type="document_structure",
+                    metadata={
+                        "pdf_header": str(header),
+                        "is_encrypted": bool(getattr(reader, "is_encrypted", False)),
+                        "metadata_keys": [
+                            str(key).lstrip("/")
+                            for key in (reader.metadata or {}).keys()
+                        ],
+                    },
+                )
+            )
+        except Exception as exc:
+            warnings.append(
+                f"No se pudo inspeccionar estructura global del PDF: {exc}"
+            )
+
+        return objects
+
+    @staticmethod
+    def _safe_box(value: Any) -> tuple[float, float, float, float] | None:
+        try:
+            if value is None or len(value) != 4:
+                return None
+            return tuple(float(item) for item in value)
+        except Exception:
+            return None
+
+    @classmethod
+    def _safe_pdf_value(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        try:
+            resolved = value.get_object()
+            if resolved is not value:
+                return cls._safe_pdf_value(resolved)
+        except Exception:
+            resolved = value
+
+        if isinstance(resolved, (str, int, float, bool)):
+            return resolved
+        if isinstance(resolved, (list, tuple)):
+            return [cls._safe_pdf_value(item) for item in resolved[:20]]
+        return str(resolved)
+
+    @staticmethod
+    def _safe_geometry_box(value: dict[str, Any]) -> tuple[float, float, float, float] | None:
+        for keys in (("x0", "top", "x1", "bottom"), ("x0", "y0", "x1", "y1")):
+            try:
+                if all(key in value for key in keys):
+                    return tuple(float(value[key]) for key in keys)
+            except Exception:
+                continue
+        return None
+
+    @staticmethod
+    def _json_safe(value: Any) -> Any:
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        if isinstance(value, (list, tuple)):
+            return [PDFDocumentProcessor._json_safe(item) for item in value[:20]]
+        return str(value)
+
+    @staticmethod
+    def _build_coverage_report(
+        *,
+        pages: list[PdfPageAnalysis],
+        images: list[PdfImage],
+        structural_objects: list[PdfStructuralObject],
+        document_errors: list[str],
+    ) -> dict[str, Any]:
+        page_count = len(pages)
+        processed_pages = sum(1 for page in pages if not page.errors)
+        visual_pages = sum(
+            1
+            for page in pages
+            if page.visual_ocr_attempted and page.visual_ocr_complete
+        )
+        image_ocr_attempted = sum(
+            1 for image in images if image.ocr_attempted
+        )
+        image_ocr_with_text = sum(
+            1 for image in images if image.ocr_text.strip()
+        )
+        structural_counts: dict[str, int] = {}
+        for item in structural_objects:
+            structural_counts[item.object_type] = (
+                structural_counts.get(item.object_type, 0) + 1
+            )
+
+        complete = (
+            page_count > 0
+            and processed_pages == page_count
+            and visual_pages == page_count
+            and not document_errors
+        )
+
+        return {
+            "status": "complete" if complete else "partial",
+            "page_count": page_count,
+            "processed_page_count": processed_pages,
+            "native_text_page_count": sum(
+                1 for page in pages if page.native_text.strip()
+            ),
+            "visual_ocr_page_count": visual_pages,
+            "embedded_image_count": len(images),
+            "embedded_image_ocr_attempted": image_ocr_attempted,
+            "embedded_image_ocr_with_text": image_ocr_with_text,
+            "structural_object_count": len(structural_objects),
+            "structural_object_counts": structural_counts,
+            "document_error_count": len(document_errors),
+        }
 
     @staticmethod
     def _extract_pdf_metadata(
