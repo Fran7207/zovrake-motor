@@ -1,7 +1,5 @@
 from io import BytesIO
 
-import cv2
-import numpy as np
 from PIL import Image, ImageDraw
 
 from zovrake_motor.comprehension.pdf_processing.visual_understanding import (
