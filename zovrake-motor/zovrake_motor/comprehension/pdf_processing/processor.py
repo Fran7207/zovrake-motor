@@ -422,6 +422,7 @@ class PDFDocumentProcessor:
             page_number,
             reader_page,
             plumber_page,
+            pdf_bytes,
             warnings,
         )
 
@@ -1394,6 +1395,7 @@ class PDFDocumentProcessor:
         page_number: int,
         reader_page: Any,
         plumber_page: pdfplumber.page.Page,
+        pdf_bytes: bytes,
         warnings: list[str],
     ) -> list[PdfImage]:
         images: list[PdfImage] = []
@@ -1592,21 +1594,103 @@ class PDFDocumentProcessor:
                     continue
 
                 image_id = f"page-{page_number}-{name}"
+                recovered_bytes = b""
+                recovered_width: int | None = (
+                    int(srcsize[0]) if len(srcsize) >= 1 else None
+                )
+                recovered_height: int | None = (
+                    int(srcsize[1]) if len(srcsize) >= 2 else None
+                )
+
+                # pdfplumber puede conocer la posición de una imagen que
+                # pypdf no expone como payload binario. En ese caso no
+                # declaramos la imagen como "leída": la reconstruimos desde
+                # el render completo de la página y la sometemos al mismo
+                # OCR/entendimiento visual local.
+                if bbox is not None:
+                    try:
+                        recovered_bytes, recovered_width, recovered_height = (
+                            self._recover_image_bytes_from_page(
+                                pdf_bytes=pdf_bytes,
+                                page_number=page_number,
+                                bbox=bbox,
+                            )
+                        )
+                    except Exception as exc:
+                        warnings.append(
+                            f"Página {page_number}, imagen '{name}': "
+                            f"no pudo materializarse desde el render de página: {exc}"
+                        )
+
+                recovered_ocr_attempted = False
+                recovered_ocr_text = ""
+                recovered_ocr_confidence = 0.0
+                recovered_ocr_blocks: tuple[dict[str, Any], ...] = ()
+                recovered_visual_understanding: dict[str, Any] = {}
+
+                if recovered_bytes:
+                    if self._ocr_embedded_images:
+                        recovered_ocr_attempted = True
+                        try:
+                            ocr_result = self._ocr_processor.process_image_bytes(
+                                image_bytes=recovered_bytes,
+                                page_number=page_number,
+                            )
+                            recovered_ocr_text = ocr_result.text
+                            recovered_ocr_confidence = ocr_result.confidence
+                            recovered_ocr_blocks = tuple(
+                                {
+                                    "text": block.text,
+                                    "bbox": list(block.bbox),
+                                    "confidence": block.confidence,
+                                    "source": "recovered_page_crop_ocr",
+                                    "coordinate_space": "image",
+                                }
+                                for block in ocr_result.blocks
+                            )
+                        except Exception as exc:
+                            warnings.append(
+                                f"Página {page_number}, imagen '{name}': "
+                                f"OCR sobre región recuperada falló: {exc}"
+                            )
+
+                    try:
+                        visual_result = self._visual_understanding.analyze_image_bytes(
+                            image_bytes=recovered_bytes,
+                            detected_text=recovered_ocr_text,
+                            page_number=page_number,
+                            source_id=image_id,
+                        )
+                        recovered_visual_understanding = visual_result.to_dict()
+                    except Exception as exc:
+                        warnings.append(
+                            f"Página {page_number}, imagen '{name}': "
+                            f"comprensión visual de región recuperada falló: {exc}"
+                        )
+                        recovered_visual_understanding = {
+                            "analysis_status": "failed",
+                            "error": str(exc),
+                        }
+
                 images.append(
                     PdfImage(
                         image_id=image_id,
                         page_number=page_number,
-                        width=(
-                            int(srcsize[0])
-                            if len(srcsize) >= 1
-                            else None
-                        ),
-                        height=(
-                            int(srcsize[1])
-                            if len(srcsize) >= 2
-                            else None
-                        ),
+                        width=recovered_width,
+                        height=recovered_height,
+                        image_format="PNG" if recovered_bytes else "",
+                        byte_size=len(recovered_bytes),
                         bbox=bbox,
+                        content_sha256=(
+                            sha256(recovered_bytes).hexdigest()
+                            if recovered_bytes
+                            else ""
+                        ),
+                        ocr_attempted=recovered_ocr_attempted,
+                        ocr_text=recovered_ocr_text,
+                        ocr_confidence=recovered_ocr_confidence,
+                        ocr_blocks=recovered_ocr_blocks,
+                        visual_understanding=recovered_visual_understanding,
                     )
                 )
                 known_by_key[key] = len(images) - 1
@@ -1618,6 +1702,42 @@ class PDFDocumentProcessor:
             )
 
         return images
+
+    def _recover_image_bytes_from_page(
+        self,
+        *,
+        pdf_bytes: bytes,
+        page_number: int,
+        bbox: tuple[float, float, float, float],
+    ) -> tuple[bytes, int, int]:
+        """Materializa una región visual desde el render completo de página.
+
+        Sirve para PDFs donde un extractor reconoce la presencia/posición de
+        una imagen pero no entrega su payload binario. El recorte conserva la
+        evidencia visual real de la página y permite reutilizar OCR y visión
+        local sobre esa región.
+        """
+        rendered = self._ocr_processor.render_page(
+            pdf_bytes=pdf_bytes,
+            page_number=page_number,
+        )
+        try:
+            scale = self._ocr_processor.dpi / 72.0
+            x0, top, x1, bottom = bbox
+            left = max(0, min(rendered.width - 1, round(x0 * scale)))
+            upper = max(0, min(rendered.height - 1, round(top * scale)))
+            right = max(left + 1, min(rendered.width, round(x1 * scale)))
+            lower = max(upper + 1, min(rendered.height, round(bottom * scale)))
+
+            cropped = rendered.crop((left, upper, right, lower)).convert("RGB")
+            try:
+                buffer = BytesIO()
+                cropped.save(buffer, format="PNG")
+                return buffer.getvalue(), cropped.width, cropped.height
+            finally:
+                cropped.close()
+        finally:
+            rendered.close()
 
     def _extract_page_structural_objects(
         self,
@@ -2092,3 +2212,4 @@ class PDFDocumentProcessor:
             )
 
         return result
+        
