@@ -58,8 +58,8 @@ class PDFDocumentProcessor:
         *,
         ocr_processor: OcrProcessor | None = None,
         ocr_visual_pages: bool = True,
-        ocr_all_pages: bool = False,
-        ocr_embedded_images: bool = False,
+        ocr_all_pages: bool = True,
+        ocr_embedded_images: bool = True,
     ) -> None:
         self._ocr_processor = ocr_processor or OcrProcessor()
         self._ocr_visual_pages = bool(ocr_visual_pages)
@@ -82,7 +82,10 @@ class PDFDocumentProcessor:
         reader = self._open_reader(pdf_bytes)
 
         try:
-            with pdfplumber.open(BytesIO(pdf_bytes)) as plumber_pdf:
+            with pdfplumber.open(
+                BytesIO(pdf_bytes),
+                strict_metadata=False,
+            ) as plumber_pdf:
                 return self._process_document(
                     document_id=document_id,
                     file_name=file_name,
@@ -100,11 +103,28 @@ class PDFDocumentProcessor:
     @staticmethod
     def _open_reader(pdf_bytes: bytes) -> PdfReader:
         try:
-            return PdfReader(BytesIO(pdf_bytes))
+            reader = PdfReader(BytesIO(pdf_bytes), strict=False)
         except Exception as exc:
             raise PdfInvalidDocumentError(
                 f"El archivo no pudo abrirse como PDF: {exc}"
             ) from exc
+
+        # Los PDF cifrados que no requieren contraseña sí pueden procesarse
+        # de forma transparente. Un PDF protegido con contraseña real no se
+        # puede leer legítimamente sin esa credencial y se informa como tal.
+        if reader.is_encrypted:
+            try:
+                decrypted = reader.decrypt("")
+            except Exception as exc:
+                raise PdfInvalidDocumentError(
+                    "El PDF está cifrado y no pudo desbloquearse sin contraseña."
+                ) from exc
+            if not decrypted:
+                raise PdfInvalidDocumentError(
+                    "El PDF está protegido con contraseña; se requiere la credencial para leer su contenido."
+                )
+
+        return reader
 
     def _process_document(
         self,
@@ -259,6 +279,8 @@ class PDFDocumentProcessor:
         )
 
         metadata = self._extract_pdf_metadata(reader)
+        metadata["document_payload_sha256"] = sha256(pdf_bytes).hexdigest()
+        metadata["document_payload_size_bytes"] = len(pdf_bytes)
 
         ocr_pages_executed = tuple(
             page.page_number
@@ -560,11 +582,11 @@ class PDFDocumentProcessor:
             "image_count": len(images),
         }
 
-        # La página completa también se analiza visualmente. Esto cubre
-        # contenido que no exista como imagen embebida: gráficos, logos
-        # vectoriales, sellos, firmas, diagramas y composiciones de objetos.
-        if visual_ocr_complete:
-            try:
+        # La página completa se analiza visualmente independientemente de que
+        # OCR haya reconocido texto. Esto cubre gráficos, logos vectoriales,
+        # sellos, firmas, diagramas y composiciones que no existan como
+        # imágenes embebidas independientes.
+        try:
                 rendered = self._ocr_processor.render_page(
                     pdf_bytes=pdf_bytes,
                     page_number=page_number,
@@ -584,15 +606,15 @@ class PDFDocumentProcessor:
                     }
                 finally:
                     rendered.close()
-            except Exception as exc:
-                warnings.append(
-                    f"Página {page_number}: no pudo completarse la comprensión visual local: {exc}"
-                )
-                visual_understanding = {
-                    **visual_understanding,
-                    "analysis_status": "failed",
-                    "analysis_error": str(exc),
-                }
+        except Exception as exc:
+            warnings.append(
+                f"Página {page_number}: no pudo completarse la comprensión visual local: {exc}"
+            )
+            visual_understanding = {
+                **visual_understanding,
+                "analysis_status": "failed",
+                "analysis_error": str(exc),
+            }
 
         return PdfPageAnalysis(
             page_number=page_number,
@@ -2161,6 +2183,8 @@ class PDFDocumentProcessor:
             and processed_pages == page_count
             and visual_pages == page_count
             and visual_ocr_pages == page_count
+            and visual_understanding_completed_pages == page_count
+            and visual_understanding_failed_pages == 0
             and not document_errors
         )
 
