@@ -274,6 +274,10 @@ class PdfPageAnalysis:
     visual_text: str = ""
     visual_ocr_complete: bool = False
     visual_ocr_attempted: bool = False
+    visual_render_sha256: str = ""
+    visual_render_width_px: int | None = None
+    visual_render_height_px: int | None = None
+    ocr_passes_executed: tuple[int, ...] = ()
 
     # Información específica de OCR.
     ocr_executed: bool = False
@@ -316,6 +320,10 @@ class PdfPageAnalysis:
             "visual_text": self.visual_text,
             "visual_ocr_complete": self.visual_ocr_complete,
             "visual_ocr_attempted": self.visual_ocr_attempted,
+            "visual_render_sha256": self.visual_render_sha256,
+            "visual_render_width_px": self.visual_render_width_px,
+            "visual_render_height_px": self.visual_render_height_px,
+            "ocr_passes_executed": list(self.ocr_passes_executed),
             "ocr_executed": self.ocr_executed,
             "ocr_text": self.ocr_text,
             "ocr_blocks": [
@@ -358,6 +366,8 @@ class ProcessedPdfDocument:
     visual_text: str = ""
     visual_ocr_complete: bool = False
     visual_ocr_pages_executed: tuple[int, ...] = ()
+    visual_render_page_count: int = 0
+    visual_rendered_page_hashes: tuple[str, ...] = ()
 
     extraction_method: str = "native_pdf"
     warnings: tuple[str, ...] = ()
@@ -418,6 +428,8 @@ class ProcessedPdfDocument:
             "visual_text": self.visual_text,
             "visual_ocr_complete": self.visual_ocr_complete,
             "visual_ocr_pages_executed": list(self.visual_ocr_pages_executed),
+            "visual_render_page_count": self.visual_render_page_count,
+            "visual_rendered_page_hashes": list(self.visual_rendered_page_hashes),
             "extraction_method": self.extraction_method,
             "warnings": list(self.warnings),
             "errors": list(self.errors),

@@ -5,7 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
+import hashlib
 import os
+import re
 import shutil
 from typing import Any
 
@@ -34,6 +36,10 @@ class OcrPageResult:
     page_number: int
     dpi: int
     language: str
+    render_sha256: str = ""
+    render_width_px: int | None = None
+    render_height_px: int | None = None
+    passes_executed: tuple[int, ...] = ()
 
 
 class OcrProcessor:
@@ -59,6 +65,8 @@ class OcrProcessor:
         dpi: int = 200,
         language: str = "spa+eng",
         psm: int = 6,
+        multi_pass: bool = True,
+        upscale_factor: float = 1.5,
     ) -> None:
         if dpi <= 0:
             raise ValueError("dpi debe ser mayor que cero.")
@@ -70,10 +78,14 @@ class OcrProcessor:
 
         if psm <= 0:
             raise ValueError("psm debe ser mayor que cero.")
+        if upscale_factor < 1.0:
+            raise ValueError("upscale_factor debe ser mayor o igual que 1.")
 
         self._dpi = dpi
         self._language = language
         self._psm = psm
+        self._multi_pass = bool(multi_pass)
+        self._upscale_factor = float(upscale_factor)
         self._tesseract_cmd = self._resolve_tesseract()
 
         # Configuramos explícitamente el ejecutable para que el OCR no
@@ -211,84 +223,179 @@ class OcrProcessor:
         image: Image.Image,
         page_number: int,
     ) -> OcrPageResult:
-        config = f"--psm {self._psm}"
+        render_sha256 = self._image_sha256(image)
+        passes = [self._psm]
+        if self._multi_pass:
+            for candidate in (3, 11):
+                if candidate != self._psm:
+                    passes.append(candidate)
 
+        aggregate: list[OcrTextBlock] = []
+        all_confidences: list[float] = []
+        used_passes: list[int] = []
+
+        prepared = self._prepare_image(image)
+        try:
+            for psm in passes:
+                result = self._run_single_pass(
+                    image=prepared,
+                    page_number=page_number,
+                    psm=psm,
+                )
+                used_passes.append(psm)
+                all_confidences.extend(
+                    block.confidence for block in result.blocks
+                )
+                aggregate.extend(result.blocks)
+
+                # Un pass exitoso con texto abundante ya cubre buena parte
+                # de la página; los demás passes siguen siendo necesarios para
+                # descubrir regiones que el primer layout haya omitido.
+
+        finally:
+            if prepared is not image:
+                prepared.close()
+
+        merged = self._merge_blocks(aggregate)
+        text = " ".join(
+            block.text
+            for block in merged
+            if block.text.strip()
+        ).strip()
+        confidence = (
+            sum(all_confidences) / len(all_confidences)
+            if all_confidences
+            else 0.0
+        )
+
+        return OcrPageResult(
+            text=text,
+            blocks=tuple(merged),
+            confidence=round(confidence, 4),
+            page_number=page_number,
+            dpi=self._dpi,
+            language=self._language,
+            render_sha256=render_sha256,
+            render_width_px=image.width,
+            render_height_px=image.height,
+            passes_executed=tuple(used_passes),
+        )
+
+    def _run_single_pass(
+        self,
+        *,
+        image: Image.Image,
+        page_number: int,
+        psm: int,
+    ) -> OcrPageResult:
+        config = f"--psm {psm}"
         data: dict[str, Any] = pytesseract.image_to_data(
             image,
             lang=self._language,
             config=config,
             output_type=Output.DICT,
         )
-
         blocks: list[OcrTextBlock] = []
-        text_parts: list[str] = []
         confidences: list[float] = []
+        scale = 72.0 / self._dpi / self._upscale_factor
 
-        for index, raw_text in enumerate(
-            data.get("text", ())
-        ):
+        for index, raw_text in enumerate(data.get("text", ())):
             text = str(raw_text or "").strip()
-
             if not text:
                 continue
-
-            raw_confidence = data["conf"][index]
-
             try:
-                confidence = float(
-                    raw_confidence
-                )
+                confidence = float(data["conf"][index])
             except (TypeError, ValueError):
                 continue
-
             if confidence < 0:
                 continue
-
             x = float(data["left"][index])
             y = float(data["top"][index])
             width = float(data["width"][index])
             height = float(data["height"][index])
-
-            # Convertimos las coordenadas de píxeles
-            # a puntos PDF (72 puntos por pulgada).
-            scale = 72.0 / self._dpi
-
-            bbox = (
-                x * scale,
-                y * scale,
-                (x + width) * scale,
-                (y + height) * scale,
-            )
-
             blocks.append(
                 OcrTextBlock(
                     text=text,
-                    bbox=bbox,
+                    bbox=(
+                        x * scale,
+                        y * scale,
+                        (x + width) * scale,
+                        (y + height) * scale,
+                    ),
                     confidence=confidence / 100.0,
                 )
             )
-
-            text_parts.append(text)
-            confidences.append(
-                confidence / 100.0
-            )
-
-        text = " ".join(text_parts).strip()
-
-        document_confidence = (
-            sum(confidences) / len(confidences)
-            if confidences
-            else 0.0
-        )
+            confidences.append(confidence / 100.0)
 
         return OcrPageResult(
-            text=text,
+            text=" ".join(block.text for block in blocks).strip(),
             blocks=tuple(blocks),
-            confidence=round(
-                document_confidence,
-                4,
-            ),
+            confidence=(sum(confidences) / len(confidences) if confidences else 0.0),
             page_number=page_number,
             dpi=self._dpi,
             language=self._language,
+            render_sha256="",
+            render_width_px=image.width,
+            render_height_px=image.height,
+            passes_executed=(psm,),
         )
+
+    def _prepare_image(self, image: Image.Image) -> Image.Image:
+        rgb = image.convert("RGB")
+        if self._upscale_factor == 1.0:
+            return rgb
+        width = max(1, round(rgb.width * self._upscale_factor))
+        height = max(1, round(rgb.height * self._upscale_factor))
+        return rgb.resize((width, height), Image.Resampling.LANCZOS)
+
+    @staticmethod
+    def _image_sha256(image: Image.Image) -> str:
+        buffer = BytesIO()
+        image.save(buffer, format="PNG")
+        return hashlib.sha256(buffer.getvalue()).hexdigest()
+
+    @staticmethod
+    def _normalize_text(value: str) -> str:
+        return re.sub(r"\W+", " ", value.casefold()).strip()
+
+    @classmethod
+    def _merge_blocks(cls, blocks: list[OcrTextBlock]) -> list[OcrTextBlock]:
+        merged: list[OcrTextBlock] = []
+        for block in blocks:
+            normalized = cls._normalize_text(block.text)
+            duplicate_index = None
+            for idx, existing in enumerate(merged):
+                if cls._normalize_text(existing.text) != normalized:
+                    continue
+                ex = existing.bbox
+                bx = block.bbox
+                if ex is None or bx is None:
+                    duplicate_index = idx
+                    break
+                overlap = cls._bbox_iou(ex, bx)
+                if overlap >= 0.35:
+                    duplicate_index = idx
+                    break
+            if duplicate_index is None:
+                merged.append(block)
+                continue
+            existing = merged[duplicate_index]
+            if block.confidence > existing.confidence:
+                merged[duplicate_index] = block
+        return merged
+
+    @staticmethod
+    def _bbox_iou(
+        a: tuple[float, float, float, float],
+        b: tuple[float, float, float, float],
+    ) -> float:
+        ax0, ay0, ax1, ay1 = a
+        bx0, by0, bx1, by1 = b
+        ix0, iy0 = max(ax0, bx0), max(ay0, by0)
+        ix1, iy1 = min(ax1, bx1), min(ay1, by1)
+        iw, ih = max(0.0, ix1 - ix0), max(0.0, iy1 - iy0)
+        inter = iw * ih
+        area_a = max(0.0, ax1 - ax0) * max(0.0, ay1 - ay0)
+        area_b = max(0.0, bx1 - bx0) * max(0.0, by1 - by0)
+        union = area_a + area_b - inter
+        return inter / union if union > 0 else 0.0

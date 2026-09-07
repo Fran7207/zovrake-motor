@@ -306,6 +306,11 @@ class PDFDocumentProcessor:
             for page in pages
             if page.visual_ocr_attempted and page.ocr_executed
         )
+        visual_rendered_page_hashes = tuple(
+            page.visual_render_sha256
+            for page in pages
+            if page.visual_render_sha256
+        )
         visual_ocr_complete = (
             bool(pages)
             and len(visual_ocr_pages_executed) == len(pages)
@@ -348,6 +353,8 @@ class PDFDocumentProcessor:
             visual_text=visual_text,
             visual_ocr_complete=visual_ocr_complete,
             visual_ocr_pages_executed=visual_ocr_pages_executed,
+            visual_render_page_count=len(visual_rendered_page_hashes),
+            visual_rendered_page_hashes=visual_rendered_page_hashes,
             extraction_method=(
                 "native_pdf+ocr"
                 if ocr_executed
@@ -443,6 +450,10 @@ class PDFDocumentProcessor:
         visual_text = ""
         visual_ocr_attempted = False
         visual_ocr_complete = False
+        visual_render_sha256 = ""
+        visual_render_width_px: int | None = None
+        visual_render_height_px: int | None = None
+        ocr_passes_executed: tuple[int, ...] = ()
 
         if requires_ocr:
             visual_ocr_attempted = True
@@ -457,6 +468,11 @@ class PDFDocumentProcessor:
                 ocr_confidence = ocr_result.confidence
                 ocr_language = ocr_result.language
                 ocr_dpi = ocr_result.dpi
+
+                visual_render_sha256 = ocr_result.render_sha256
+                visual_render_width_px = ocr_result.render_width_px
+                visual_render_height_px = ocr_result.render_height_px
+                ocr_passes_executed = ocr_result.passes_executed
 
                 visual_text = ocr_text
                 visual_ocr_complete = True
@@ -546,6 +562,10 @@ class PDFDocumentProcessor:
             visual_text=visual_text,
             visual_ocr_complete=visual_ocr_complete,
             visual_ocr_attempted=visual_ocr_attempted,
+            visual_render_sha256=visual_render_sha256,
+            visual_render_width_px=visual_render_width_px,
+            visual_render_height_px=visual_render_height_px,
+            ocr_passes_executed=ocr_passes_executed,
             ocr_executed=ocr_executed,
             ocr_text=ocr_text,
             ocr_blocks=ocr_blocks,
@@ -1455,9 +1475,10 @@ class PDFDocumentProcessor:
                 f"{page_number}: {exc}"
             )
 
-        # pdfplumber permite detectar imágenes aunque pypdf no haya podido
-        # exponerlas como objetos de imagen. Se conserva la detección para
-        # que la cobertura física nunca dependa de un único extractor.
+        # pdfplumber puede detectar las mismas imágenes que pypdf con un
+        # identificador ligeramente distinto (por ejemplo ``IM39`` frente a
+        # ``IM39.jpg``). Primero enriquecemos la imagen que ya tiene payload
+        # y después agregamos únicamente objetos realmente nuevos.
         try:
             plumber_images = getattr(
                 plumber_page,
@@ -1465,25 +1486,31 @@ class PDFDocumentProcessor:
                 (),
             )
 
-            known_ids = {image.image_id for image in images}
-            for index, image in enumerate(plumber_images or ()):
+            def image_key(name: str, size: Any = None) -> tuple[str, Any]:
+                normalized_name = str(name or "").strip().rsplit("/", 1)[-1]
+                if "." in normalized_name:
+                    normalized_name = normalized_name.rsplit(".", 1)[0]
+                normalized_size = tuple(size or ()) if size else None
+                return normalized_name.casefold(), normalized_size
+
+            known_by_key = {
+                image_key(image.image_id.split(f"page-{page_number}-", 1)[-1], (image.width, image.height)): index
+                for index, image in enumerate(images)
+            }
+
+            for index, image in enumerate(plumber_images or ()): 
                 name = str(
                     image.get("name")
                     or f"detected-image-{index + 1}"
                 )
-                image_id = (
-                    f"page-{page_number}-"
-                    f"{name}"
-                )
-
-                if image_id in known_ids:
-                    continue
+                srcsize = image.get("srcsize") or ()
+                key = image_key(name, srcsize)
 
                 bbox = None
                 try:
                     bbox = tuple(
-                        float(image[key])
-                        for key in (
+                        float(image[key_name])
+                        for key_name in (
                             "x0",
                             "top",
                             "x1",
@@ -1493,23 +1520,35 @@ class PDFDocumentProcessor:
                 except Exception:
                     bbox = None
 
+                existing_index = known_by_key.get(key)
+                if existing_index is not None:
+                    existing = images[existing_index]
+                    if existing.bbox is None and bbox is not None:
+                        images[existing_index] = replace(
+                            existing,
+                            bbox=bbox,
+                        )
+                    continue
+
+                image_id = f"page-{page_number}-{name}"
                 images.append(
                     PdfImage(
                         image_id=image_id,
                         page_number=page_number,
                         width=(
-                            int(image["srcsize"][0])
-                            if image.get("srcsize")
+                            int(srcsize[0])
+                            if len(srcsize) >= 1
                             else None
                         ),
                         height=(
-                            int(image["srcsize"][1])
-                            if image.get("srcsize")
+                            int(srcsize[1])
+                            if len(srcsize) >= 2
                             else None
                         ),
                         bbox=bbox,
                     )
                 )
+                known_by_key[key] = len(images) - 1
 
         except Exception as exc:
             warnings.append(
@@ -1891,6 +1930,11 @@ class PDFDocumentProcessor:
         visual_pages = sum(
             1
             for page in pages
+            if page.visual_render_sha256
+        )
+        visual_ocr_pages = sum(
+            1
+            for page in pages
             if page.visual_ocr_attempted and page.visual_ocr_complete
         )
         image_ocr_attempted = sum(
@@ -1905,10 +1949,22 @@ class PDFDocumentProcessor:
                 structural_counts.get(item.object_type, 0) + 1
             )
 
+        image_payload_unavailable = sum(
+            1
+            for image in images
+            if image.byte_size <= 0
+        )
+        low_confidence_ocr_pages = sum(
+            1
+            for page in pages
+            if page.ocr_executed and 0.0 < page.ocr_confidence < 0.55
+        )
+
         complete = (
             page_count > 0
             and processed_pages == page_count
             and visual_pages == page_count
+            and visual_ocr_pages == page_count
             and not document_errors
         )
 
@@ -1919,10 +1975,13 @@ class PDFDocumentProcessor:
             "native_text_page_count": sum(
                 1 for page in pages if page.native_text.strip()
             ),
-            "visual_ocr_page_count": visual_pages,
+            "visual_capture_page_count": visual_pages,
+            "visual_ocr_page_count": visual_ocr_pages,
             "embedded_image_count": len(images),
             "embedded_image_ocr_attempted": image_ocr_attempted,
             "embedded_image_ocr_with_text": image_ocr_with_text,
+            "embedded_image_payload_unavailable_count": image_payload_unavailable,
+            "low_confidence_ocr_page_count": low_confidence_ocr_pages,
             "structural_object_count": len(structural_objects),
             "structural_object_counts": structural_counts,
             "document_error_count": len(document_errors),
