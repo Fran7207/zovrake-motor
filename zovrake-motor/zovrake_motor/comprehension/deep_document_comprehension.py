@@ -1137,6 +1137,7 @@ class DeepDocumentComprehensionEngine:
                 {"kind": key, "score": round(value, 4), "evidence": evidence.get(key, [])}
                 for key, value in ranked[:8]
             ],
+            "page_count": knowledge.page_count,
             "properties": {
                 "has_text": bool(knowledge.text.strip()),
                 "has_visual_text": bool(knowledge.visual_text.strip()),
