@@ -29,6 +29,9 @@ from zovrake_motor.comprehension.document_fact_extractor import (
 from zovrake_motor.comprehension.document_fact_entity_linker import (
     DocumentFactEntityLinker,
 )
+from zovrake_motor.comprehension.deep_document_comprehension import (
+    DeepDocumentComprehensionEngine,
+)
 
 
 _HEADER_MARKERS = (
@@ -873,6 +876,12 @@ def _decode_document_content(
             # Se vinculan hechos y atributos con las entidades ya resueltas.
             # Esta operación conserva la evidencia y no vuelve a leer el PDF.
             document_knowledge = DocumentFactEntityLinker().link(
+                document_knowledge,
+            )
+
+            # Comprensión profunda unificada: consume exclusivamente
+            # DocumentKnowledge ya construido y no vuelve a leer el PDF.
+            document_knowledge = DeepDocumentComprehensionEngine().comprehend(
                 document_knowledge,
             )
 
