@@ -28,6 +28,9 @@ from zovrake_motor.comprehension.pdf_processing.semantic_tables import (
     PdfSemanticTableAnalyzer,
 )
 from zovrake_motor.comprehension.pdf_processing.ocr import OcrProcessor
+from zovrake_motor.comprehension.pdf_processing.visual_understanding import (
+    MultimodalVisualUnderstandingEngine,
+)
 
 
 class PDFDocumentProcessor:
@@ -62,6 +65,7 @@ class PDFDocumentProcessor:
         self._ocr_visual_pages = bool(ocr_visual_pages)
         self._ocr_all_pages = bool(ocr_all_pages)
         self._ocr_embedded_images = bool(ocr_embedded_images)
+        self._visual_understanding = MultimodalVisualUnderstandingEngine()
 
     def process(
         self,
@@ -454,6 +458,7 @@ class PDFDocumentProcessor:
         visual_render_width_px: int | None = None
         visual_render_height_px: int | None = None
         ocr_passes_executed: tuple[int, ...] = ()
+        visual_understanding: dict[str, Any] = {}
 
         if requires_ocr:
             visual_ocr_attempted = True
@@ -545,6 +550,49 @@ class PDFDocumentProcessor:
         has_tables = bool(tables) or bool(semantic_tables)
         has_images = bool(images)
 
+        visual_understanding = {
+            "stage": "visual_capture",
+            "visual_ocr_complete": visual_ocr_complete,
+            "visual_text_length": len(visual_text.strip()),
+            "ocr_block_count": len(ocr_blocks),
+            "ocr_confidence": ocr_confidence,
+            "image_count": len(images),
+        }
+
+        # La página completa también se analiza visualmente. Esto cubre
+        # contenido que no exista como imagen embebida: gráficos, logos
+        # vectoriales, sellos, firmas, diagramas y composiciones de objetos.
+        if visual_ocr_complete:
+            try:
+                rendered = self._ocr_processor.render_page(
+                    pdf_bytes=pdf_bytes,
+                    page_number=page_number,
+                )
+                try:
+                    page_visual = self._visual_understanding.analyze_pil_image(
+                        image=rendered,
+                        detected_text=visual_text,
+                        page_number=page_number,
+                        source_id=f"page-{page_number}",
+                    )
+                    visual_understanding = page_visual.to_dict() | {
+                        "stage": "page_visual_understanding",
+                        "visual_ocr_complete": visual_ocr_complete,
+                        "ocr_passes_executed": list(ocr_passes_executed),
+                        "image_count": len(images),
+                    }
+                finally:
+                    rendered.close()
+            except Exception as exc:
+                warnings.append(
+                    f"Página {page_number}: no pudo completarse la comprensión visual local: {exc}"
+                )
+                visual_understanding = {
+                    **visual_understanding,
+                    "analysis_status": "failed",
+                    "analysis_error": str(exc),
+                }
+
         return PdfPageAnalysis(
             page_number=page_number,
             width=width,
@@ -566,6 +614,7 @@ class PDFDocumentProcessor:
             visual_render_width_px=visual_render_width_px,
             visual_render_height_px=visual_render_height_px,
             ocr_passes_executed=ocr_passes_executed,
+            visual_understanding=visual_understanding,
             ocr_executed=ocr_executed,
             ocr_text=ocr_text,
             ocr_blocks=ocr_blocks,
@@ -1442,6 +1491,13 @@ class PDFDocumentProcessor:
                             f"no pudo ejecutarse OCR directo sobre la imagen: {exc}"
                         )
 
+                visual_result = self._visual_understanding.analyze_image_bytes(
+                    image_bytes=data,
+                    detected_text=ocr_text,
+                    page_number=page_number,
+                    source_id=name,
+                ) if data else None
+
                 images.append(
                     PdfImage(
                         image_id=(
@@ -1466,6 +1522,11 @@ class PDFDocumentProcessor:
                         ocr_text=ocr_text,
                         ocr_confidence=ocr_confidence,
                         ocr_blocks=ocr_blocks,
+                        visual_understanding=(
+                            visual_result.to_dict()
+                            if visual_result is not None
+                            else {"analysis_status": "unavailable"}
+                        ),
                     )
                 )
 
@@ -1954,6 +2015,21 @@ class PDFDocumentProcessor:
             for image in images
             if image.byte_size <= 0
         )
+        visual_understanding_attempted_pages = sum(
+            1
+            for page in pages
+            if page.visual_understanding
+        )
+        visual_understanding_completed_pages = sum(
+            1
+            for page in pages
+            if str(page.visual_understanding.get("analysis_status", "")) == "completed"
+        )
+        visual_understanding_failed_pages = sum(
+            1
+            for page in pages
+            if str(page.visual_understanding.get("analysis_status", "")) == "failed"
+        )
         low_confidence_ocr_pages = sum(
             1
             for page in pages
@@ -1981,6 +2057,14 @@ class PDFDocumentProcessor:
             "embedded_image_ocr_attempted": image_ocr_attempted,
             "embedded_image_ocr_with_text": image_ocr_with_text,
             "embedded_image_payload_unavailable_count": image_payload_unavailable,
+            "visual_understanding_attempted_page_count": visual_understanding_attempted_pages,
+            "visual_understanding_completed_page_count": visual_understanding_completed_pages,
+            "visual_understanding_failed_page_count": visual_understanding_failed_pages,
+            "visual_understanding_complete": (
+                page_count > 0
+                and visual_understanding_completed_pages == page_count
+                and visual_understanding_failed_pages == 0
+            ),
             "low_confidence_ocr_page_count": low_confidence_ocr_pages,
             "structural_object_count": len(structural_objects),
             "structural_object_counts": structural_counts,

@@ -137,16 +137,10 @@ class OcrProcessor:
                     f"La página {page_number} no existe."
                 )
 
-            page = pdf[page_index]
-
-            scale = self._dpi / 72.0
-
-            bitmap = page.render(
-                scale=scale,
+            image = self.render_page(
+                pdf_bytes=pdf_bytes,
+                page_number=page_number,
             )
-
-            image = bitmap.to_pil()
-
             try:
                 return self._run_ocr(
                     image=image,
@@ -155,6 +149,33 @@ class OcrProcessor:
             finally:
                 image.close()
 
+        finally:
+            pdf.close()
+
+    def render_page(
+        self,
+        *,
+        pdf_bytes: bytes,
+        page_number: int,
+    ) -> Image.Image:
+        """Renderiza una página PDF y entrega sus píxeles al motor local.
+
+        El llamador es responsable de cerrar la imagen retornada.
+        """
+        if not pdf_bytes:
+            raise ValueError("No se proporcionaron datos PDF.")
+        if page_number < 1:
+            raise ValueError("page_number debe ser mayor o igual a 1.")
+
+        pdf = pdfium.PdfDocument(BytesIO(pdf_bytes))
+        try:
+            page_index = page_number - 1
+            if page_index >= len(pdf):
+                raise ValueError(f"La página {page_number} no existe.")
+            page = pdf[page_index]
+            scale = self._dpi / 72.0
+            bitmap = page.render(scale=scale)
+            return bitmap.to_pil().convert("RGB")
         finally:
             pdf.close()
 

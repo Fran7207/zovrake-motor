@@ -61,6 +61,7 @@ class PdfImage:
     ocr_text: str = ""
     ocr_confidence: float = 0.0
     ocr_blocks: tuple[dict[str, Any], ...] = ()
+    visual_understanding: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -80,6 +81,7 @@ class PdfImage:
             "ocr_text": self.ocr_text,
             "ocr_confidence": self.ocr_confidence,
             "ocr_blocks": list(self.ocr_blocks),
+            "visual_understanding": dict(self.visual_understanding),
         }
 
 
@@ -278,6 +280,7 @@ class PdfPageAnalysis:
     visual_render_width_px: int | None = None
     visual_render_height_px: int | None = None
     ocr_passes_executed: tuple[int, ...] = ()
+    visual_understanding: dict[str, Any] = field(default_factory=dict)
 
     # Información específica de OCR.
     ocr_executed: bool = False
@@ -324,6 +327,7 @@ class PdfPageAnalysis:
             "visual_render_width_px": self.visual_render_width_px,
             "visual_render_height_px": self.visual_render_height_px,
             "ocr_passes_executed": list(self.ocr_passes_executed),
+            "visual_understanding": dict(self.visual_understanding),
             "ocr_executed": self.ocr_executed,
             "ocr_text": self.ocr_text,
             "ocr_blocks": [

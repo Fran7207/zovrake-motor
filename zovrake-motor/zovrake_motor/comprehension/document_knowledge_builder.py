@@ -430,14 +430,23 @@ class DocumentKnowledgeBuilder:
                 index,
             )
 
+            image_payload = image.to_dict()
+            visual = dict(image_payload.get("visual_understanding") or {})
             region = DocumentRegion(
                 region_id=region_id,
                 page_number=page.page_number,
                 region_type="image",
-                content="",
+                bbox=image.bbox,
+                content=str(visual.get("description") or "").strip(),
                 source_kind="pdf_image",
-                confidence=1.0,
-                metadata=image.to_dict(),
+                confidence=max(
+                    0.0,
+                    min(
+                        1.0,
+                        float(visual.get("visual_confidence", 1.0) or 0.0),
+                    ),
+                ),
+                metadata=image_payload,
             )
 
             regions.append(region)
@@ -537,6 +546,44 @@ class DocumentKnowledgeBuilder:
                 self._evidence_for_region(
                     region,
                     source_id=block.block_id,
+                )
+            )
+
+        # ---------------------------------------------------------
+        # 7. Comprensión visual de la página completa.
+        # ---------------------------------------------------------
+        page_visual = dict(page.visual_understanding or {})
+        if page_visual:
+            region_id = self._stable_id(
+                page.page_number,
+                "page_visual",
+                page_visual.get("object_type", "visual_content"),
+            )
+            content = str(
+                page_visual.get("description")
+                or "Contenido visual de página procesado."
+            )
+            confidence = max(
+                0.0,
+                min(
+                    1.0,
+                    float(page_visual.get("visual_confidence", 0.0) or 0.0),
+                ),
+            )
+            region = DocumentRegion(
+                region_id=region_id,
+                page_number=page.page_number,
+                region_type="page_visual",
+                content=content,
+                source_kind="visual_understanding",
+                confidence=confidence,
+                metadata=page_visual,
+            )
+            regions.append(region)
+            evidence.append(
+                self._evidence_for_region(
+                    region,
+                    source_id=f"page-{page.page_number}-visual",
                 )
             )
 
