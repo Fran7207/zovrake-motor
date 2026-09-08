@@ -25,6 +25,8 @@ _ALIAS_GROUPS: dict[str, tuple[str, ...]] = {
         "producto",
         "item",
         "detalle",
+        "productos",
+        "producto(s)",
     ),
     "QUANTITY": (
         "quantity",
@@ -47,6 +49,8 @@ _ALIAS_GROUPS: dict[str, tuple[str, ...]] = {
         "unidad de medida",
         "um",
         "um.",
+        "medida",
+        "medida.",
     ),
     "UNIT_PRICE": (
         "unit price",

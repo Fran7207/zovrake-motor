@@ -244,8 +244,16 @@ class MultimodalVisualUnderstandingEngine:
             return "stamp_or_signature", 0.82, ("el texto visual contiene señales de sello/firma/aprobación",)
         if text_length and commercial and structured >= 5:
             return "commercial_graphic", 0.88, ("texto comercial combinado con estructura geométrica",)
-        if text_length and identity and color_std < 28 and edge_density < 0.16:
-            return "logo_or_identity_graphic", 0.78, ("texto identificativo con variación cromática moderada",)
+        if (
+            text_length
+            and identity
+            and entropy < 4.5
+            and edge_density < 0.25
+            and color_std < 70
+        ):
+            return "logo_or_identity_graphic", 0.86, (
+                "texto identificativo y estructura visual compacta compatibles con un logotipo o identidad gráfica",
+            )
         if structured >= 12 and text_length >= 20 and diagonal_lines >= 2:
             return "diagram_or_chart", 0.74, ("alta densidad de geometría estructurada y texto",)
         if color_std >= 38 and entropy >= 5.2 and edge_density >= 0.08:

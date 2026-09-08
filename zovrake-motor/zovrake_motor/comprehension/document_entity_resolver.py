@@ -49,7 +49,7 @@ class DocumentEntityResolver:
     )
 
     _RUC = re.compile(
-        r"(?i)\bR\.?\s*U\.?\s*C\.?\s*[:\-]?\s*"
+        r"(?i)\bR\.?\s*U\.?\s*C\.?(?:\s*[:\-]\s*)+"
         r"(?P<value>\d{11})\b"
     )
 
@@ -92,9 +92,25 @@ class DocumentEntityResolver:
         r")\s*[:\-]\s*(?P<value>.+?)\s*$"
     )
 
+    _RECIPIENT_HEADER = re.compile(
+        r"(?i)^\s*(?:señor(?:es)?|sres?\.?|señora(?:s)?)\s*"
+        r"[:\-]?\s*(?P<value>.+?)\s*$"
+    )
+
+    _RECIPIENT_INLINE = re.compile(
+        r"(?i)\b(?:señor(?:es)?|sres?\.?|señora(?:s)?)\s*"
+        r"[:\-]\s*(?P<value>.*?)(?=\s+soles\b|\s+fecha\b|\s+\d{1,2}/\d{1,2}/\d{2,4}\b|$)"
+    )
+
+    _BANK_IDENTITY_HEADER = re.compile(
+        r"(?i)^\s*(?:cuentas?\s+bancarias|datos\s+bancarios|"
+        r"informaci[oó]n\s+bancaria|bank\s+accounts?)\s+"
+        r"(?:de\s+|del\s+|de\s+la\s+)?(?P<value>.+?)\s*$"
+    )
+
     _PAYEE_LABEL = re.compile(
         r"(?i)\b(?:depositar|dep[oó]sito)\s+a\s+nombre\s*[:\-]\s*"
-        r"(?P<value>.+?)\s*$"
+        r"(?P<value>.+?)(?=\s+R\.?\s*U\.?\s*C\.?\s*[:\-]|\s+Cuentas?\s+Recaudadoras\b|\s*$)"
     )
 
     _HEADER_CUSTOMER_MARKER = re.compile(
@@ -185,6 +201,11 @@ class DocumentEntityResolver:
         # el texto completo permite recuperar entidades que fueron
         # separadas por el layout o por tablas distintas.
         # ---------------------------------------------------------
+        self._collect_explicit_recipient_candidates(
+            lines=lines,
+            candidates=candidates,
+        )
+
         self._collect_header_customer_candidates(
             lines=lines,
             candidates=candidates,
@@ -493,6 +514,66 @@ class DocumentEntityResolver:
                     candidates=candidates,
                 )
 
+    def _collect_explicit_recipient_candidates(
+        self,
+        *,
+        lines: list[str],
+        candidates: dict[
+            tuple[str, str],
+            dict[str, Any],
+        ],
+    ) -> None:
+        """Recupera destinatarios marcados explícitamente en el encabezado."""
+        for index, line in enumerate(lines[:24]):
+            match = self._RECIPIENT_HEADER.match(line)
+            if not match:
+                match = self._RECIPIENT_INLINE.search(line)
+            if not match:
+                continue
+
+            value = self._clean_name(match.group("value"))
+            value_index = index
+
+            if not self._looks_like_legal_entity(value):
+                for next_index in range(index + 1, min(index + 3, len(lines))):
+                    possible = self._clean_name(lines[next_index])
+                    if self._looks_like_legal_entity(possible):
+                        value = possible
+                        value_index = next_index
+                        break
+
+            if not self._looks_like_legal_entity(value):
+                continue
+
+            ruc = self._find_recipient_identifier(
+                lines=lines,
+                line_index=index,
+                inline_match=match if value_index == index else None,
+            )
+
+            self._add_candidate(
+                role="customer",
+                name=value,
+                region=None,
+                source="explicit_recipient_header",
+                score=48.0,
+                candidates=candidates,
+            )
+
+            state = candidates.get(("customer", self._entity_key(value)))
+            if state is None:
+                continue
+
+            state["attributes"]["source_line_index"] = value_index
+            state["attributes"]["recipient_marker"] = "señores"
+            state["score"] += 12.0
+            state["evidence"].append("explicit_recipient_header")
+
+            if ruc:
+                state["identifier"] = ruc
+                state["score"] += 12.0
+                state["evidence"].append(f"recipient_tax_id:{ruc}")
+
     def _collect_header_customer_candidates(
         self,
         *,
@@ -517,6 +598,13 @@ class DocumentEntityResolver:
         aparece antes de la transición explícita al discurso del emisor.
         """
         if not lines:
+            return
+
+        if any(
+            self._RECIPIENT_HEADER.match(line)
+            or self._RECIPIENT_INLINE.search(line)
+            for line in lines[:16]
+        ):
             return
 
         search_limit = min(
@@ -648,6 +736,48 @@ class DocumentEntityResolver:
 
         return ""
 
+    @classmethod
+    def _find_recipient_identifier(
+        cls,
+        *,
+        lines: list[str],
+        line_index: int,
+        inline_match: re.Match[str] | None,
+    ) -> str:
+        """Obtiene el identificador posterior al marcador de destinatario."""
+        if inline_match is not None:
+            line = lines[line_index]
+            matches = list(cls._RUC.finditer(line))
+            for ruc_match in matches:
+                if ruc_match.start() >= inline_match.start():
+                    return ruc_match.group("value")
+
+        for index in range(line_index + 1, min(len(lines), line_index + 4)):
+            match = cls._RUC.search(lines[index])
+            if match:
+                return match.group("value")
+        return ""
+
+    @classmethod
+    def _find_identifier_after_position(
+        cls,
+        *,
+        lines: list[str],
+        line_index: int,
+        position: int,
+    ) -> str:
+        """Busca un RUC después de una etiqueta de identidad en la misma línea."""
+        line = lines[line_index]
+        match = cls._RUC.search(line, position)
+        if match:
+            return match.group("value")
+
+        for index in range(line_index + 1, min(len(lines), line_index + 3)):
+            match = cls._RUC.search(lines[index])
+            if match:
+                return match.group("value")
+        return ""
+
     def _collect_text_candidates(
         self,
         *,
@@ -728,13 +858,10 @@ class DocumentEntityResolver:
                     candidates=candidates,
                 )
 
-                provider_ruc = self._find_nearby_identifier(
+                provider_ruc = self._find_identifier_after_position(
                     lines=lines,
-                    start=max(0, index - 1),
-                    end=min(
-                        len(lines),
-                        index + 3,
-                    ),
+                    line_index=index,
+                    position=payee_match.end(),
                 )
 
                 if provider_name and provider_ruc:
@@ -870,8 +997,14 @@ class DocumentEntityResolver:
             return
 
         header_text = "\n".join(text_lines[:24])
-        ruc_matches = list(self._RUC.finditer(header_text))
-        header_ruc = ruc_matches[0].group("value") if ruc_matches else ""
+        recipient_marker = self._RECIPIENT_INLINE.search(header_text)
+        header_search_text = (
+            header_text[:recipient_marker.start()]
+            if recipient_marker
+            else ""
+        )
+        ruc_matches = list(self._RUC.finditer(header_search_text))
+        header_ruc = ruc_matches[-1].group("value") if ruc_matches else ""
 
         visual_candidates: list[tuple[str, str, float]] = []
         images = getattr(knowledge, "images", ()) or ()
@@ -910,6 +1043,34 @@ class DocumentEntityResolver:
         aggregated_name = self._extract_brand_like_name(aggregated_visual)
         if aggregated_name:
             visual_candidates.append((aggregated_name, "visual_text", 9.0))
+
+        for line in text_lines[:80]:
+            bank_match = self._BANK_IDENTITY_HEADER.match(line)
+            if not bank_match:
+                continue
+            bank_name = self._clean_name(bank_match.group("value"))
+            if not self._looks_like_legal_entity(bank_name):
+                continue
+            self._add_candidate(
+                role="provider",
+                name=bank_name,
+                region=None,
+                source="bank_account_holder_identity",
+                score=26.0,
+                candidates=candidates,
+                require_legal_entity=False,
+            )
+
+        for visual_name, source_id, visual_score in visual_candidates:
+            self._add_candidate(
+                role="provider",
+                name=visual_name,
+                region=None,
+                source=f"visual_header:{source_id}",
+                score=18.0 + visual_score,
+                candidates=candidates,
+                require_legal_entity=False,
+            )
 
         for email in self._extract_emails("\n".join(text_lines)):
             email_name = self._name_from_business_email(email)
@@ -953,6 +1114,23 @@ class DocumentEntityResolver:
                 state["score"] += 4.0
                 state["evidence"].append("visual_header_identity_support")
 
+        for provider_candidate in list(candidates.values()):
+            if provider_candidate.get("role") != "provider":
+                continue
+            candidate_name = str(provider_candidate.get("name") or "").strip()
+            if not candidate_name:
+                continue
+            if header_ruc:
+                provider_candidate["identifier"] = header_ruc
+                provider_candidate["score"] += 14.0
+                provider_candidate["evidence"].append(f"header_first_ruc:{header_ruc}")
+                provider_candidate["attributes"]["identity_cross_source"] = (
+                    "header_ruc_plus_visual_or_bank_identity"
+                )
+            if visual_candidates:
+                provider_candidate["score"] += 4.0
+                provider_candidate["evidence"].append("visual_header_identity_support")
+
     @staticmethod
     def _extract_emails(text: str) -> tuple[str, ...]:
         matches = re.findall(
@@ -994,6 +1172,40 @@ class DocumentEntityResolver:
         if not cleaned:
             return ""
 
+        legal_match = re.search(
+            r"(?i)(?P<body>[A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9&.-]+(?:\s+[A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9&.-]+){0,7})"
+            r"\s+(?P<legal>S\.?A\.?C?\.?|S\.?R\.?L\.?|E\.?I\.?R\.?L\.?)\b",
+            cleaned,
+        )
+        if legal_match:
+            body_tokens = re.findall(
+                r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9&.-]{3,}",
+                legal_match.group("body"),
+            )
+            ignored = {
+                "ruc", "cotizacion", "cotización", "fecha", "empresa",
+                "cliente", "proveedor", "productos", "servicios",
+                "aa", "aro", "www",
+            }
+            filtered = [
+                token for token in body_tokens
+                if token.casefold() not in ignored
+            ]
+            if filtered:
+                business_prefixes = {
+                    "grupo", "corporacion", "corporación", "industrial",
+                    "comercial", "inversiones", "constructora",
+                }
+                prefix = [t for t in filtered if t.casefold() in business_prefixes]
+                corporate = [t for t in filtered if t.casefold() == "corporativo"]
+                middle = [
+                    t for t in filtered
+                    if t.casefold() not in business_prefixes
+                    and t.casefold() != "corporativo"
+                ]
+                ordered = prefix + corporate + middle
+                return " ".join(ordered[:5] + [legal_match.group("legal")]).upper()
+
         tokens = re.findall(
             r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]{2,}",
             cleaned,
@@ -1002,7 +1214,7 @@ class DocumentEntityResolver:
             "ruc", "cotizacion", "cotización", "fecha", "empresa",
             "cliente", "proveedor", "productos", "servicios",
             "ladrillos", "cemento", "tuberias", "tuberías", "aa",
-            "aro", "y", "o",
+            "aro", "y", "o", "vo", "ae", "na", "f",
         }
         useful = [token for token in tokens if token.casefold() not in ignored]
         if not useful:
@@ -1011,15 +1223,12 @@ class DocumentEntityResolver:
         business_tokens = {
             "corporacion", "corporación", "grupo", "empresa", "industrial",
             "comercial", "inversiones", "constructora", "servicios",
+            "corporativo",
         }
-        for token in useful:
-            if token.casefold() in business_tokens:
-                other = next((item for item in useful if item is not token), "")
-                if other:
-                    return f"{token} {other}".upper()
-        if len(useful) >= 2:
-            return " ".join(useful[:2]).upper()
-        return useful[0].upper() if useful[0].isupper() else ""
+        prefix = [t for t in useful if t.casefold() in business_tokens]
+        distinct = [t for t in useful if t.casefold() not in business_tokens]
+        ordered = prefix[:2] + distinct[:3]
+        return " ".join(ordered).upper() if ordered else ""
 
     @staticmethod
     def _identity_tokens_overlap(left: str, right: str) -> bool:

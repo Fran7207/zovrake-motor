@@ -2833,7 +2833,7 @@ def _infer_physical_item_column_indexes(
         "code": ("item", "ítem", "codigo", "código", "cod", "sku", "partida"),
         "description": ("descripcion", "descripción", "producto", "concepto", "detalle", "material", "servicio"),
         "quantity": ("cantidad", "cant", "qty", "volumen"),
-        "unit": ("unidad", "und", "unid", "u.m.", "um", "u.medida"),
+        "unit": ("unidad", "und", "unid", "u.m.", "um", "u.medida", "medida"),
         "unit_price": ("precio unitario", "p unit", "p/u", "p. u.", "p.u.", "precio", "s/p. u."),
         "total": ("total", "s/.total", "importe", "monto", "subtotal"),
     }
@@ -2859,6 +2859,20 @@ def _infer_physical_item_column_indexes(
     return result
 
 
+def _normalize_tabular_numeric_cell(value: Any) -> str:
+    """Normaliza separaciones espurias introducidas por OCR en una celda numérica.
+
+    Solo elimina espacios entre caracteres numéricos cuando la celda no contiene
+    letras. Esto conserva tokens como ``BLS`` y evita convertir texto libre.
+    """
+    text = str(value or "").strip()
+    if not text or re.search(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]", text):
+        return text
+    if not re.search(r"\d", text):
+        return text
+    compact = re.sub(r"(?<=\d)\s+(?=\d)", "", text)
+    return compact
+
 def _build_physical_item_from_row(
     *,
     header: tuple[str, ...] | list[str],
@@ -2874,10 +2888,18 @@ def _build_physical_item_from_row(
         idx = mapping.get(key)
         if idx is None or idx >= len(row):
             return ""
-        return str(row[idx] or "").strip()
+        raw_value = str(row[idx] or "").strip()
+        if key in {"quantity", "unit_price", "total"}:
+            return _normalize_tabular_numeric_cell(raw_value)
+        return raw_value
 
     fields = {
-        str(header[idx]).strip() or f"column_{idx + 1}": str(row[idx] or "").strip()
+        str(header[idx]).strip() or f"column_{idx + 1}": (
+            _normalize_tabular_numeric_cell(str(row[idx] or "").strip())
+            if str(header[idx]).strip().casefold()
+            in {"cantidad", "cant", "qty", "volumen", "precio", "p/unit.", "p/unit", "total", "importe", "monto"}
+            else str(row[idx] or "").strip()
+        )
         for idx in range(min(len(header), len(row)))
         if str(header[idx]).strip()
     }

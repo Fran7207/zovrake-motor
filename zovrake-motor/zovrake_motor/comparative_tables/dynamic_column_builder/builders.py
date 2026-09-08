@@ -298,31 +298,66 @@ def extract_attribute_candidates(
         )
 
         visible_by_normalized: dict[str, str] = {}
+        observed_aliases: dict[str, list[str]] = {}
 
-        def add_observed(raw_name: Any, value: Any, *, scope: str = "item") -> None:
+        def add_observed(
+            raw_name: Any,
+            value: Any,
+            *,
+            scope: str = "item",
+            preserve_label: bool = True,
+        ) -> None:
             if value in (None, ""):
                 return
-            semantic = canonicalize_attribute_name(raw_name, scope=scope)
+
+            raw_label = str(raw_name).strip()
+            if not raw_label:
+                return
+
+            semantic = canonicalize_attribute_name(raw_label, scope=scope)
             normalized = semantic.semantic_key.casefold()
             if not normalized or normalized in seen_names:
                 return
+
+            observed_aliases.setdefault(normalized, [])
+            if raw_label not in observed_aliases[normalized]:
+                observed_aliases[normalized].append(raw_label)
+
             if normalized not in observed_fields:
                 observed_fields[normalized] = value
-                visible_by_normalized[normalized] = (
-                    semantic.display_name if semantic.matched_alias else str(raw_name).strip()
-                )
+                # El texto visible de una columna debe provenir de una
+                # etiqueta realmente observada en los documentos. No se
+                # fuerza "Descripción" cuando el PDF dijo "Productos".
+                visible_by_normalized[normalized] = raw_label if preserve_label else semantic.display_name
 
         for source in concept_source_map.values():
             if not isinstance(source, dict):
                 continue
 
-            for key, display_name in standard_item_fields:
-                add_observed(display_name, source.get(key, ""), scope="item")
-
             raw_fields = source.get("fields", {})
             if isinstance(raw_fields, dict):
+                # Primero se conservan las etiquetas físicas/observadas.
                 for key, value in raw_fields.items():
-                    add_observed(key, value, scope="item")
+                    add_observed(
+                        key,
+                        value,
+                        scope="item",
+                        preserve_label=True,
+                    )
+
+            # Solo usamos el nombre canónico como respaldo cuando el documento
+            # no conservó una etiqueta fuente equivalente.
+            for key, display_name in standard_item_fields:
+                semantic = canonicalize_attribute_name(key, scope="item")
+                normalized = semantic.semantic_key.casefold()
+                already_observed = normalized in observed_fields
+                if not already_observed and source.get(key, "") not in (None, ""):
+                    add_observed(
+                        display_name,
+                        source.get(key, ""),
+                        scope="item",
+                        preserve_label=False,
+                    )
 
         for normalized_name, value in sorted(observed_fields.items()):
             if normalized_name in seen_names:
