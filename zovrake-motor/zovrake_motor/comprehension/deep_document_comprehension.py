@@ -38,6 +38,9 @@ from zovrake_motor.comprehension.models import (
     DocumentKnowledge,
     DocumentRelationship,
 )
+from zovrake_motor.comprehension.universal_document_semantic_reasoner import (
+    UniversalDocumentSemanticReasoner,
+)
 
 
 class DeepDocumentComprehensionEngine:
@@ -48,7 +51,7 @@ class DeepDocumentComprehensionEngine:
     de fabricar un hecho.
     """
 
-    MODEL_VERSION = "2.0-universal-deterministic"
+    MODEL_VERSION = "2.1-universal-evidence-reasoning"
     SCHEMA_VERSION = "deep-comprehension-schema-v2"
 
     # ------------------------------------------------------------------
@@ -264,6 +267,8 @@ class DeepDocumentComprehensionEngine:
         if not isinstance(knowledge, DocumentKnowledge):
             raise TypeError("knowledge debe ser una instancia de DocumentKnowledge")
 
+        universal_understanding = UniversalDocumentSemanticReasoner().analyze(knowledge)
+
         concepts = self._build_semantic_concepts(knowledge)
         line_model = self._build_reading_lines(knowledge)
         lexical_observations = self._extract_lexical_observations(knowledge, line_model)
@@ -303,6 +308,8 @@ class DeepDocumentComprehensionEngine:
                 "deep_comprehension_schema_version": self.SCHEMA_VERSION,
                 "deep_comprehension_stage": "unified_semantic_reasoning",
                 "deep_comprehension_profile": document_profile,
+                "deep_universal_understanding": universal_understanding,
+                "deep_universal_semantic_model_version": universal_understanding["model_version"],
                 "deep_semantic_concepts": concepts,
                 "deep_semantic_index": semantic_index,
                 "deep_typed_values": typed_values,

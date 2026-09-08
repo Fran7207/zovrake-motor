@@ -142,3 +142,5 @@ __all__ = [
     "ValidationStatus",
     "WordDocumentAdapter",
 ]
+
+from zovrake_motor.comprehension.universal_document_semantic_reasoner import UniversalDocumentSemanticReasoner
