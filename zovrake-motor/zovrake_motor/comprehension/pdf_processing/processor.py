@@ -161,6 +161,11 @@ class PDFDocumentProcessor:
                 images=(),
                 reading_order=(),
                 ordered_text="",
+                capture_audit={
+                    "status": "invalid",
+                    "page_count": 0,
+                    "reason": "document_without_pages",
+                },
                 errors=("El PDF no contiene páginas.",),
             )
 
@@ -362,6 +367,15 @@ class PDFDocumentProcessor:
             structural_objects=all_structural_objects,
         )
         ordered_text = self._build_ordered_text(document_reading_order)
+        capture_audit = self._build_document_capture_audit(
+            pages=pages,
+            images=all_images,
+            tables=all_tables,
+            semantic_tables=all_semantic_tables,
+            structural_objects=all_structural_objects,
+            reading_order=document_reading_order,
+            document_errors=document_errors,
+        )
 
         return ProcessedPdfDocument(
             document_id=document_id,
@@ -393,6 +407,7 @@ class PDFDocumentProcessor:
             visual_rendered_page_hashes=visual_rendered_page_hashes,
             reading_order=document_reading_order,
             ordered_text=ordered_text,
+            capture_audit=capture_audit,
             extraction_method=(
                 "native_pdf+ocr"
                 if ocr_executed
@@ -659,6 +674,36 @@ class PDFDocumentProcessor:
                 semantic_tables=semantic_tables,
                 images=images,
                 visual_understanding=visual_understanding,
+            ),
+            capture_audit=self._build_page_capture_audit(
+                page_number=page_number,
+                native_text=native_text,
+                text=text,
+                text_blocks=text_blocks,
+                tables=tables,
+                semantic_tables=semantic_tables,
+                images=images,
+                structural_objects=(),
+                requires_ocr=requires_ocr,
+                ocr_executed=ocr_executed,
+                visual_ocr_attempted=visual_ocr_attempted,
+                visual_ocr_complete=visual_ocr_complete,
+                visual_render_sha256=visual_render_sha256,
+                visual_understanding=visual_understanding,
+                ocr_blocks=ocr_blocks,
+                reading_order_count=len(
+                    self._build_page_reading_order(
+                        page_number=page_number,
+                        width=width,
+                        height=height,
+                        text_blocks=text_blocks,
+                        tables=tables,
+                        semantic_tables=semantic_tables,
+                        images=images,
+                        visual_understanding=visual_understanding,
+                    )
+                ),
+                warnings=warnings,
             ),
             ocr_executed=ocr_executed,
             ocr_text=ocr_text,
@@ -2623,6 +2668,176 @@ class PDFDocumentProcessor:
         if isinstance(value, (list, tuple)):
             return [PDFDocumentProcessor._json_safe(item) for item in value[:20]]
         return str(value)
+
+    @staticmethod
+    def _build_page_capture_audit(
+        *,
+        page_number: int,
+        native_text: str,
+        text: str,
+        text_blocks: list[PdfTextBlock],
+        tables: list[PdfTable],
+        semantic_tables: list[PdfSemanticTable],
+        images: list[PdfImage],
+        structural_objects: tuple[PdfStructuralObject, ...] | list[PdfStructuralObject],
+        requires_ocr: bool,
+        ocr_executed: bool,
+        visual_ocr_attempted: bool,
+        visual_ocr_complete: bool,
+        visual_render_sha256: str,
+        visual_understanding: dict[str, Any],
+        ocr_blocks: tuple[PdfOcrBlock, ...],
+        reading_order_count: int,
+        warnings: list[str],
+    ) -> dict[str, Any]:
+        image_payload_missing = sum(1 for image in images if image.byte_size <= 0)
+        image_ocr_failures = sum(
+            1
+            for image in images
+            if image.ocr_attempted and not image.ocr_text.strip()
+        )
+        image_visual_failures = sum(
+            1
+            for image in images
+            if str(image.visual_understanding.get("analysis_status", "")) == "failed"
+        )
+        visual_status = str(visual_understanding.get("analysis_status", "") or "")
+
+        return {
+            "status": "complete" if not warnings and visual_status != "failed" and visual_render_sha256 else "complete_with_warnings",
+            "page_number": page_number,
+            "layers": {
+                "native_text": True,
+                "text_blocks": True,
+                "tables": True,
+                "semantic_tables": True,
+                "embedded_images": True,
+                "page_render": bool(visual_render_sha256),
+                "page_ocr_execution": (not requires_ocr) or ocr_executed,
+                "embedded_image_ocr_execution": True,
+                "visual_understanding_execution": visual_status in {"completed", ""},
+                "reading_order": reading_order_count > 0 or not (text or images or tables or semantic_tables),
+            },
+            "counts": {
+                "native_text_chars": len(native_text.strip()),
+                "text_chars": len(text.strip()),
+                "text_block_count": len(text_blocks),
+                "ocr_block_count": len(ocr_blocks),
+                "table_count": len(tables),
+                "semantic_table_count": len(semantic_tables),
+                "image_count": len(images),
+                "image_payload_missing_count": image_payload_missing,
+                "image_ocr_without_text_count": image_ocr_failures,
+                "image_visual_failure_count": image_visual_failures,
+                "structural_object_count": len(structural_objects),
+                "reading_order_count": reading_order_count,
+            },
+            "recognition": {
+                "ocr_executed": ocr_executed,
+                "visual_ocr_attempted": visual_ocr_attempted,
+                "visual_ocr_complete": visual_ocr_complete,
+                "ocr_recognized_text": bool(text.strip()),
+                "ocr_zero_text_is_not_capture_failure": True,
+                "visual_understanding_status": visual_status or "not_recorded",
+                "recognition_warnings": list(warnings),
+            },
+        }
+
+    @classmethod
+    def _build_document_capture_audit(
+        cls,
+        *,
+        pages: list[PdfPageAnalysis],
+        images: list[PdfImage],
+        tables: list[PdfTable],
+        semantic_tables: list[PdfSemanticTable],
+        structural_objects: list[PdfStructuralObject],
+        reading_order: tuple[PdfReadingEntry, ...],
+        document_errors: list[str],
+    ) -> dict[str, Any]:
+        page_count = len(pages)
+        successful_pages = sum(1 for page in pages if not page.errors)
+        rendered_pages = sum(1 for page in pages if page.visual_render_sha256)
+        visual_completed = sum(
+            1
+            for page in pages
+            if str(page.visual_understanding.get("analysis_status", "")) == "completed"
+        )
+        page_audits = [dict(page.capture_audit) for page in pages]
+        pages_with_warnings = sum(
+            1 for page in pages if page.warnings
+        )
+        page_failures = sum(1 for page in pages if page.errors)
+        image_payload_missing = sum(1 for image in images if image.byte_size <= 0)
+        image_ocr_attempted = sum(1 for image in images if image.ocr_attempted)
+        image_ocr_with_text = sum(1 for image in images if image.ocr_text.strip())
+        recognition_gaps: list[dict[str, Any]] = []
+        for page in pages:
+            if page.ocr_executed and not page.ocr_text.strip():
+                recognition_gaps.append({
+                    "page_number": page.page_number,
+                    "type": "page_ocr_no_text",
+                    "severity": "recognition",
+                })
+            if page.ocr_executed and 0.0 < page.ocr_confidence < 0.55:
+                recognition_gaps.append({
+                    "page_number": page.page_number,
+                    "type": "low_ocr_confidence",
+                    "severity": "recognition",
+                    "confidence": page.ocr_confidence,
+                })
+        for image in images:
+            if image.ocr_attempted and not image.ocr_text.strip():
+                recognition_gaps.append({
+                    "page_number": image.page_number,
+                    "image_id": image.image_id,
+                    "type": "embedded_image_ocr_no_text",
+                    "severity": "recognition",
+                })
+            if image.byte_size <= 0:
+                recognition_gaps.append({
+                    "page_number": image.page_number,
+                    "image_id": image.image_id,
+                    "type": "image_payload_unavailable",
+                    "severity": "capture",
+                })
+
+        core_complete = (
+            page_count > 0
+            and successful_pages == page_count
+            and rendered_pages == page_count
+            and visual_completed == page_count
+            and image_payload_missing == 0
+            and not document_errors
+        )
+        status = "complete" if core_complete else "partial"
+        return {
+            "contract_version": "1.0",
+            "status": status,
+            "page_count": page_count,
+            "processed_page_count": successful_pages,
+            "rendered_page_count": rendered_pages,
+            "visual_understanding_completed_page_count": visual_completed,
+            "table_count": len(tables),
+            "semantic_table_count": len(semantic_tables),
+            "image_count": len(images),
+            "image_ocr_attempted_count": image_ocr_attempted,
+            "image_ocr_with_text_count": image_ocr_with_text,
+            "image_payload_missing_count": image_payload_missing,
+            "structural_object_count": len(structural_objects),
+            "reading_order_entry_count": len(reading_order),
+            "warning_page_count": pages_with_warnings,
+            "error_page_count": page_failures,
+            "recognition_gap_count": len(recognition_gaps),
+            "recognition_gaps": recognition_gaps,
+            "pages": page_audits,
+            "interpretation": {
+                "capture_complete": core_complete,
+                "recognition_complete": len(recognition_gaps) == 0,
+                "recognition_gaps_do_not_imply_missing_pdf_bytes": True,
+                "text_recognition_is_not_the_same_as_content_capture": True,
+            },
+        }
 
     @staticmethod
     def _build_coverage_report(

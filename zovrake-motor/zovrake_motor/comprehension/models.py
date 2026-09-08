@@ -198,6 +198,7 @@ class DocumentKnowledge:
     ocr_blocks: tuple[dict[str, Any], ...] = ()
     reading_order: tuple[dict[str, Any], ...] = ()
     ordered_text: str = ""
+    capture_audit: dict[str, Any] = field(default_factory=dict)
 
     # Comprensión semántica.
     sections: tuple[dict[str, Any], ...] = ()
@@ -267,6 +268,7 @@ class DocumentKnowledge:
             "ocr_blocks": list(self.ocr_blocks),
             "reading_order": list(self.reading_order),
             "ordered_text": self.ordered_text,
+            "capture_audit": dict(self.capture_audit),
             "sections": list(self.sections),
             "entities": [
                 entity.to_dict()

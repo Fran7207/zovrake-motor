@@ -206,7 +206,8 @@ class DocumentKnowledgeBuilder:
                 "source_reading_order_count": len(document.reading_order),
                 "source_ordered_text_length": len(document.ordered_text),
                 "source_unordered_text": document.full_text,
-                "reading_contract_version": "1.0-spatial-preserved",
+                "reading_contract_version": "1.1-spatial-preserved-with-capture-audit",
+                "source_capture_audit": dict(document.capture_audit),
                 "region_count": len(regions),
                 "evidence_count": len(evidence),
                 "unresolved_count": len(unresolved),
@@ -245,6 +246,7 @@ class DocumentKnowledgeBuilder:
                 for entry in document.reading_order
             ),
             ordered_text=document.ordered_text,
+            capture_audit=dict(document.capture_audit),
             sections=(),
             entities=(),
             attributes=(),

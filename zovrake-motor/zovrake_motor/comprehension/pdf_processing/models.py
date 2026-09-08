@@ -314,6 +314,11 @@ class PdfPageAnalysis:
     # cada bloque para que comprensión no tenga que reconstruir el layout.
     reading_order: tuple[PdfReadingEntry, ...] = ()
 
+    # Auditoría de captura física: distingue "procesado" de "texto
+    # reconocido" para no marcar una página como parcial únicamente porque
+    # una capa OCR no encontró caracteres.
+    capture_audit: dict[str, Any] = field(default_factory=dict)
+
     # Información específica de OCR.
     ocr_executed: bool = False
     ocr_text: str = ""
@@ -361,6 +366,7 @@ class PdfPageAnalysis:
             "ocr_passes_executed": list(self.ocr_passes_executed),
             "visual_understanding": dict(self.visual_understanding),
             "reading_order": [entry.to_dict() for entry in self.reading_order],
+            "capture_audit": dict(self.capture_audit),
             "ocr_executed": self.ocr_executed,
             "ocr_text": self.ocr_text,
             "ocr_blocks": [
@@ -409,6 +415,7 @@ class ProcessedPdfDocument:
     # Secuencia documental completa y ordenada.
     reading_order: tuple[PdfReadingEntry, ...] = ()
     ordered_text: str = ""
+    capture_audit: dict[str, Any] = field(default_factory=dict)
 
     extraction_method: str = "native_pdf"
     warnings: tuple[str, ...] = ()
@@ -473,6 +480,7 @@ class ProcessedPdfDocument:
             "visual_rendered_page_hashes": list(self.visual_rendered_page_hashes),
             "reading_order": [entry.to_dict() for entry in self.reading_order],
             "ordered_text": self.ordered_text,
+            "capture_audit": dict(self.capture_audit),
             "extraction_method": self.extraction_method,
             "warnings": list(self.warnings),
             "errors": list(self.errors),
