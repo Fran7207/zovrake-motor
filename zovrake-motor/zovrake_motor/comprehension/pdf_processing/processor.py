@@ -6,6 +6,7 @@ from dataclasses import replace
 from hashlib import sha256
 from io import BytesIO
 from typing import Any
+from difflib import SequenceMatcher
 
 import pdfplumber
 from pypdf import PdfReader
@@ -16,6 +17,7 @@ from zovrake_motor.comprehension.pdf_processing.exceptions import (
 )
 from zovrake_motor.comprehension.pdf_processing.models import (
     PdfImage,
+    PdfReadingEntry,
     PdfStructuralObject,
     PdfOcrBlock,
     PdfPageAnalysis,
@@ -157,6 +159,8 @@ class PDFDocumentProcessor:
                 tables=(),
                 semantic_tables=(),
                 images=(),
+                reading_order=(),
+                ordered_text="",
                 errors=("El PDF no contiene páginas.",),
             )
 
@@ -353,6 +357,12 @@ class PDFDocumentProcessor:
                 "todas las páginas del PDF."
             )
 
+        document_reading_order = self._build_document_reading_order(
+            pages=pages,
+            structural_objects=all_structural_objects,
+        )
+        ordered_text = self._build_ordered_text(document_reading_order)
+
         return ProcessedPdfDocument(
             document_id=document_id,
             file_name=file_name,
@@ -381,6 +391,8 @@ class PDFDocumentProcessor:
             visual_ocr_pages_executed=visual_ocr_pages_executed,
             visual_render_page_count=len(visual_rendered_page_hashes),
             visual_rendered_page_hashes=visual_rendered_page_hashes,
+            reading_order=document_reading_order,
+            ordered_text=ordered_text,
             extraction_method=(
                 "native_pdf+ocr"
                 if ocr_executed
@@ -638,6 +650,16 @@ class PDFDocumentProcessor:
             visual_render_height_px=visual_render_height_px,
             ocr_passes_executed=ocr_passes_executed,
             visual_understanding=visual_understanding,
+            reading_order=self._build_page_reading_order(
+                page_number=page_number,
+                width=width,
+                height=height,
+                text_blocks=text_blocks,
+                tables=tables,
+                semantic_tables=semantic_tables,
+                images=images,
+                visual_understanding=visual_understanding,
+            ),
             ocr_executed=ocr_executed,
             ocr_text=ocr_text,
             ocr_blocks=ocr_blocks,
@@ -646,6 +668,452 @@ class PDFDocumentProcessor:
             ocr_dpi=ocr_dpi,
             warnings=tuple(warnings),
         )
+
+    @staticmethod
+    def _bbox_area(bbox: tuple[float, float, float, float] | None) -> float:
+        if bbox is None or len(bbox) != 4:
+            return 0.0
+        x0, y0, x1, y1 = bbox
+        return max(0.0, x1 - x0) * max(0.0, y1 - y0)
+
+    @staticmethod
+    def _block_lies_inside_table_vertical_span(
+        block: PdfTextBlock,
+        table_bbox: tuple[float, float, float, float],
+    ) -> bool:
+        if block.bbox is None:
+            return False
+        _, block_y0, _, block_y1 = block.bbox
+        _, table_y0, _, table_y1 = table_bbox
+        return block_y0 >= table_y0 - 4.0 and block_y1 <= table_y1 + 4.0
+
+    @staticmethod
+    def _text_block_belongs_to_table(
+        text: str,
+        table_values: set[str],
+    ) -> bool:
+        normalized = PDFDocumentProcessor._normalize_comparison_text(text)
+        if not normalized:
+            return False
+        if normalized in table_values:
+            return True
+        if len(normalized) >= 4:
+            return any(
+                normalized in value or value in normalized
+                for value in table_values
+                if len(value) >= 4
+            )
+        return False
+
+    @classmethod
+    def _infer_table_bbox_from_text(
+        cls,
+        *,
+        table: PdfTable,
+        text_blocks: list[PdfTextBlock],
+    ) -> tuple[float, float, float, float] | None:
+        values = {
+            cls._normalize_comparison_text(str(cell or ""))
+            for row in table.rows
+            for cell in row
+            if str(cell or "").strip()
+        }
+        if not values:
+            return None
+
+        matched = [
+            block.bbox
+            for block in text_blocks
+            if block.bbox is not None
+            and cls._text_block_belongs_to_table(block.text, values)
+        ]
+        if not matched:
+            return None
+
+        return (
+            min(box[0] for box in matched),
+            min(box[1] for box in matched),
+            max(box[2] for box in matched),
+            max(box[3] for box in matched),
+        )
+
+    @staticmethod
+    def _group_text_blocks_into_lines(
+        blocks: list[PdfTextBlock],
+    ) -> list[dict[str, Any]]:
+        """Agrupa palabras/bloques próximos en líneas de lectura deterministas."""
+        if not blocks:
+            return []
+
+        positioned = [
+            block
+            for block in blocks
+            if block.bbox is not None
+        ]
+        unpositioned = [
+            block
+            for block in blocks
+            if block.bbox is None
+        ]
+
+        lines: list[dict[str, Any]] = []
+        for block in sorted(
+            positioned,
+            key=lambda item: (
+                (item.bbox[1] + item.bbox[3]) / 2.0,
+                item.bbox[0],
+                item.block_id,
+            ),
+        ):
+            x0, y0, x1, y1 = block.bbox
+            center_y = (y0 + y1) / 2.0
+            height = max(1.0, y1 - y0)
+            target = None
+            for line in reversed(lines[-8:]):
+                tolerance = max(3.0, min(10.0, max(line['height'], height) * 0.65))
+                if abs(center_y - line['center_y']) <= tolerance:
+                    target = line
+                    break
+
+            if target is None:
+                lines.append({
+                    'center_y': center_y,
+                    'height': height,
+                    'words': [(x0, block.text.strip(), block)],
+                    'source_block_ids': [block.block_id],
+                    'confidence': [1.0],
+                })
+            else:
+                target['words'].append((x0, block.text.strip(), block))
+                target['source_block_ids'].append(block.block_id)
+                target['height'] = max(target['height'], height)
+                target['center_y'] = (target['center_y'] + center_y) / 2.0
+                target['confidence'].append(1.0)
+
+        lines.sort(key=lambda item: (item['center_y'], min(word[0] for word in item['words'])))
+        result: list[dict[str, Any]] = []
+        for line in lines:
+            ordered_words = sorted(line['words'], key=lambda item: (item[0], item[2].block_id))
+            texts = [word for _, word, _ in ordered_words if word]
+            source_blocks = [block for _, _, block in ordered_words]
+            x0 = min(block.bbox[0] for block in source_blocks)
+            y0 = min(block.bbox[1] for block in source_blocks)
+            x1 = max(block.bbox[2] for block in source_blocks)
+            y1 = max(block.bbox[3] for block in source_blocks)
+            result.append({
+                'text': ' '.join(texts),
+                'bbox': (x0, y0, x1, y1),
+                'confidence': 1.0,
+                'source_block_ids': tuple(block.block_id for block in source_blocks),
+            })
+
+        for block in unpositioned:
+            result.append({
+                'text': block.text.strip(),
+                'bbox': None,
+                'confidence': 1.0,
+                'source_block_ids': (block.block_id,),
+            })
+
+        return result
+
+    @classmethod
+    def _bbox_intersection_ratio(
+        cls,
+        left: tuple[float, float, float, float] | None,
+        right: tuple[float, float, float, float] | None,
+    ) -> float:
+        if left is None or right is None:
+            return 0.0
+        lx0, ly0, lx1, ly1 = left
+        rx0, ry0, rx1, ry1 = right
+        ix0, iy0 = max(lx0, rx0), max(ly0, ry0)
+        ix1, iy1 = min(lx1, rx1), min(ly1, ry1)
+        if ix1 <= ix0 or iy1 <= iy0:
+            return 0.0
+        intersection = (ix1 - ix0) * (iy1 - iy0)
+        return intersection / max(cls._bbox_area(right), 1.0)
+
+    @classmethod
+    def _build_page_reading_order(
+        cls,
+        *,
+        page_number: int,
+        width: float,
+        height: float,
+        text_blocks: list[PdfTextBlock],
+        tables: list[PdfTable],
+        semantic_tables: list[PdfSemanticTable],
+        images: list[PdfImage],
+        visual_understanding: dict[str, Any],
+    ) -> tuple[PdfReadingEntry, ...]:
+        """Construye una única secuencia espacial sin destruir ninguna fuente."""
+        candidates: list[tuple[float, float, int, PdfReadingEntry]] = []
+
+        inferred_table_bboxes = [
+            table.bbox
+            or cls._infer_table_bbox_from_text(
+                table=table,
+                text_blocks=text_blocks,
+            )
+            for table in tables
+        ]
+        physical_table_bboxes = [
+            bbox for bbox in inferred_table_bboxes if bbox is not None
+        ]
+
+        table_value_texts: list[set[str]] = [
+            {
+                cls._normalize_comparison_text(str(cell or ""))
+                for row in table.rows
+                for cell in row
+                if str(cell or "").strip()
+            }
+            for table in tables
+        ]
+
+        # Texto: se reconstruye en líneas de lectura mediante coordenadas,
+        # conservando además los IDs de cada bloque como evidencia.
+        filtered_text_blocks = [
+            block
+            for block in text_blocks
+            if block.text.strip()
+            and not any(
+                cls._bbox_intersection_ratio(block.bbox, bbox) >= 0.70
+                for bbox in physical_table_bboxes
+            )
+            and not any(
+                cls._text_block_belongs_to_table(block.text, values)
+                for values in table_value_texts
+                if values
+            )
+            and not any(
+                cls._block_lies_inside_table_vertical_span(block, bbox)
+                for bbox in inferred_table_bboxes
+                if bbox is not None
+            )
+        ]
+        for line_index, line in enumerate(
+            cls._group_text_blocks_into_lines(filtered_text_blocks),
+            start=1,
+        ):
+            text = line['text']
+            bbox = line['bbox']
+            entry = PdfReadingEntry(
+                sequence=0,
+                page_number=page_number,
+                content_type='text_line',
+                source_id=f'page-{page_number}-reading-line-{line_index}',
+                text=text,
+                bbox=bbox,
+                confidence=float(line['confidence']),
+                source_kind='document_text_ordered',
+                metadata={
+                    'source_block_ids': list(line['source_block_ids']),
+                    'block_count': len(line['source_block_ids']),
+                },
+            )
+            y = bbox[1] if bbox is not None else float(line_index)
+            x = bbox[0] if bbox is not None else 0.0
+            candidates.append((y, x, 10, entry))
+
+        # Tablas físicas como unidades atómicas; todas sus celdas se
+        # conservan en metadata para evitar perder estructura.
+        for index, table in enumerate(tables):
+            content = '\n'.join(' | '.join(str(cell or '') for cell in row) for row in table.rows)
+            if not content.strip():
+                continue
+            bbox = inferred_table_bboxes[index]
+            y = bbox[1] if bbox else float('inf')
+            x = bbox[0] if bbox else 0.0
+            entry = PdfReadingEntry(
+                sequence=0,
+                page_number=page_number,
+                content_type='table',
+                source_id=table.table_id,
+                text=content,
+                bbox=bbox,
+                confidence=table.semantic.confidence if table.semantic else 1.0,
+                source_kind='pdf_table',
+                metadata={
+                    'row_count': len(table.rows),
+                    'column_count': max((len(row) for row in table.rows), default=0),
+                    'semantic_table_id': table.semantic.table_id if table.semantic else '',
+                    'table_role': table.semantic.table_role if table.semantic else 'unknown',
+                },
+            )
+            candidates.append((y, x, 20, entry))
+
+        # Tablas solo semánticas: también llegan, incluso cuando no existe
+        # tabla física, y por eso siguen siendo parte de la lectura completa.
+        for index, table in enumerate(semantic_tables):
+            if table.source_table_id:
+                continue
+            content = '\n'.join(
+                ' | '.join(f'{key}={value}' for key, value in row.items())
+                for row in table.rows
+            )
+            if not content.strip():
+                continue
+            entry = PdfReadingEntry(
+                sequence=0,
+                page_number=page_number,
+                content_type='semantic_table',
+                source_id=table.table_id,
+                text=content,
+                bbox=None,
+                confidence=table.confidence,
+                source_kind='semantic_table',
+                metadata={
+                    'row_count': len(table.rows),
+                    'table_role': table.table_role,
+                    'table_roles': list(table.table_roles),
+                },
+            )
+            candidates.append((float('inf'), float(index), 21, entry))
+
+        # Imágenes: conservamos tipo visual, texto OCR, QR y pistas
+        # semánticas como una sola evidencia que viaja junta.
+        for index, image in enumerate(images):
+            visual = dict(image.visual_understanding or {})
+            image_text = str(image.ocr_text or '').strip()
+            description = str(visual.get('description') or '').strip()
+            parts = []
+            if image_text:
+                parts.append(f'[Texto OCR de imagen]\n{image_text}')
+            if description:
+                parts.append(f'[Descripción visual]\n{description}')
+            if visual.get('object_type'):
+                parts.append(f"[Tipo de imagen]\n{visual.get('object_type')}")
+            if visual.get('semantic_hints'):
+                parts.append('[Pistas semánticas]\n' + ', '.join(map(str, visual.get('semantic_hints', ()))) )
+            content = '\n'.join(parts)
+            if not content.strip() and not image.content_sha256:
+                continue
+            bbox = image.bbox
+            y = bbox[1] if bbox else float('inf')
+            x = bbox[0] if bbox else float(index)
+            entry = PdfReadingEntry(
+                sequence=0,
+                page_number=page_number,
+                content_type='image',
+                source_id=image.image_id,
+                text=content,
+                bbox=bbox,
+                confidence=float(visual.get('visual_confidence', image.ocr_confidence or 0.0) or 0.0),
+                source_kind='pdf_image',
+                metadata={
+                    'image_format': image.image_format,
+                    'width': image.width,
+                    'height': image.height,
+                    'content_sha256': image.content_sha256,
+                    'ocr_attempted': image.ocr_attempted,
+                    'ocr_confidence': image.ocr_confidence,
+                    'ocr_blocks': list(image.ocr_blocks),
+                    'visual_understanding': visual,
+                },
+            )
+            candidates.append((y, x, 30, entry))
+
+        if visual_understanding:
+            entry = PdfReadingEntry(
+                sequence=0,
+                page_number=page_number,
+                content_type='page_visual',
+                source_id=f'page-{page_number}-visual',
+                text=str(visual_understanding.get('description') or ''),
+                bbox=None,
+                confidence=float(visual_understanding.get('visual_confidence', 0.0) or 0.0),
+                source_kind='visual_understanding',
+                metadata=dict(visual_understanding),
+            )
+            # La descripción visual ocupa conceptualmente toda la página y
+            # se ordena detrás del contenido situado en ella.
+            candidates.append((float('inf'), float('inf'), 40, entry))
+
+        candidates.sort(key=lambda item: (item[0], item[2], item[1], item[3].source_id))
+        return tuple(
+            PdfReadingEntry(
+                sequence=index,
+                page_number=item[3].page_number,
+                content_type=item[3].content_type,
+                source_id=item[3].source_id,
+                text=item[3].text,
+                bbox=item[3].bbox,
+                confidence=item[3].confidence,
+                source_kind=item[3].source_kind,
+                metadata=item[3].metadata,
+            )
+            for index, item in enumerate(candidates, start=1)
+        )
+
+    @classmethod
+    def _build_document_reading_order(
+        cls,
+        *,
+        pages: list[PdfPageAnalysis],
+        structural_objects: list[PdfStructuralObject],
+    ) -> tuple[PdfReadingEntry, ...]:
+        entries: list[PdfReadingEntry] = []
+        for page in sorted(pages, key=lambda item: item.page_number):
+            entries.extend(page.reading_order)
+
+        # Objetos estructurales entran en la secuencia con coordenadas si las
+        # tienen; si no, después del contenido de su página.
+        for item in structural_objects:
+            if not str(item.text or '').strip():
+                continue
+            entries.append(
+                PdfReadingEntry(
+                    sequence=0,
+                    page_number=item.page_number or 1,
+                    content_type='structural_object',
+                    source_id=item.object_id,
+                    text=item.text,
+                    bbox=item.bbox,
+                    confidence=1.0,
+                    source_kind='pdf_structure',
+                    metadata=item.to_dict(),
+                )
+            )
+
+        entries.sort(
+            key=lambda item: (
+                item.page_number,
+                item.bbox[1] if item.bbox is not None else float('inf'),
+                item.bbox[0] if item.bbox is not None else float('inf'),
+                item.content_type,
+                item.source_id,
+            )
+        )
+
+        return tuple(
+            PdfReadingEntry(
+                sequence=index,
+                page_number=entry.page_number,
+                content_type=entry.content_type,
+                source_id=entry.source_id,
+                text=entry.text,
+                bbox=entry.bbox,
+                confidence=entry.confidence,
+                source_kind=entry.source_kind,
+                metadata=entry.metadata,
+            )
+            for index, entry in enumerate(entries, start=1)
+        )
+
+    @staticmethod
+    def _build_ordered_text(entries: tuple[PdfReadingEntry, ...]) -> str:
+        parts: list[str] = []
+        current_page: int | None = None
+        for entry in entries:
+            if entry.page_number != current_page:
+                current_page = entry.page_number
+                parts.append(f'[Página {current_page}]')
+            if not entry.text.strip():
+                continue
+            parts.append(f'[{entry.content_type}:{entry.source_id}]\n{entry.text.strip()}')
+        return '\n\n'.join(parts).strip()
 
     @staticmethod
     def _analyze_page_semantics(
@@ -1226,20 +1694,56 @@ class PDFDocumentProcessor:
         ocr_text: str,
     ) -> list[PdfTextBlock]:
         if not ocr_blocks:
-            return native_blocks
+            return cls._deduplicate_layout_blocks(native_blocks)
         if not native_blocks:
-            return ocr_blocks
+            return cls._deduplicate_layout_blocks(ocr_blocks)
 
         native_normalized = cls._normalize_comparison_text(native_text)
         ocr_normalized = cls._normalize_comparison_text(ocr_text)
 
         if native_normalized and native_normalized in ocr_normalized:
-            return ocr_blocks
+            return cls._deduplicate_layout_blocks(ocr_blocks)
 
         if ocr_normalized and ocr_normalized in native_normalized:
-            return native_blocks
+            return cls._deduplicate_layout_blocks(native_blocks)
 
-        return [*native_blocks, *ocr_blocks]
+        return cls._deduplicate_layout_blocks([*native_blocks, *ocr_blocks])
+
+    @classmethod
+    def _deduplicate_layout_blocks(
+        cls,
+        blocks: list[PdfTextBlock],
+    ) -> list[PdfTextBlock]:
+        """Elimina duplicados nativo/OCR respetando posición y texto."""
+        result: list[PdfTextBlock] = []
+        for block in blocks:
+            text = cls._normalize_comparison_text(block.text)
+            if not text:
+                continue
+            duplicate_index = None
+            for index, existing in enumerate(result):
+                existing_text = cls._normalize_comparison_text(existing.text)
+                if not existing_text:
+                    continue
+                similarity = SequenceMatcher(None, existing_text, text).ratio()
+                if similarity < 0.90:
+                    continue
+                if existing.bbox is None or block.bbox is None:
+                    duplicate_index = index
+                    break
+                if cls._bbox_iou(existing.bbox, block.bbox) >= 0.30:
+                    duplicate_index = index
+                    break
+            if duplicate_index is None:
+                result.append(block)
+                continue
+
+            existing = result[duplicate_index]
+            # Mantener el bloque con mejor representación textual; en empate
+            # se conserva el primero para estabilidad determinista.
+            if len(block.text.strip()) > len(existing.text.strip()):
+                result[duplicate_index] = block
+        return result
 
     def _requires_ocr(
         cls,

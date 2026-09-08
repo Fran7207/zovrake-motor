@@ -7,6 +7,34 @@ from typing import Any
 
 
 @dataclass(frozen=True)
+class PdfReadingEntry:
+    """Unidad de lectura ordenada para entregar evidencia al razonador documental."""
+
+    sequence: int
+    page_number: int
+    content_type: str
+    source_id: str
+    text: str = ""
+    bbox: tuple[float, float, float, float] | None = None
+    confidence: float = 0.0
+    source_kind: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "sequence": self.sequence,
+            "page_number": self.page_number,
+            "content_type": self.content_type,
+            "source_id": self.source_id,
+            "text": self.text,
+            "bbox": list(self.bbox) if self.bbox is not None else None,
+            "confidence": self.confidence,
+            "source_kind": self.source_kind,
+            "metadata": dict(self.metadata),
+        }
+
+
+@dataclass(frozen=True)
 class PdfStructuralObject:
     """Elemento estructural del PDF conservado sin interpretación de negocio.
 
@@ -282,6 +310,10 @@ class PdfPageAnalysis:
     ocr_passes_executed: tuple[int, ...] = ()
     visual_understanding: dict[str, Any] = field(default_factory=dict)
 
+    # Secuencia espacial ordenada de lectura. Conserva la procedencia de
+    # cada bloque para que comprensión no tenga que reconstruir el layout.
+    reading_order: tuple[PdfReadingEntry, ...] = ()
+
     # Información específica de OCR.
     ocr_executed: bool = False
     ocr_text: str = ""
@@ -328,6 +360,7 @@ class PdfPageAnalysis:
             "visual_render_height_px": self.visual_render_height_px,
             "ocr_passes_executed": list(self.ocr_passes_executed),
             "visual_understanding": dict(self.visual_understanding),
+            "reading_order": [entry.to_dict() for entry in self.reading_order],
             "ocr_executed": self.ocr_executed,
             "ocr_text": self.ocr_text,
             "ocr_blocks": [
@@ -372,6 +405,10 @@ class ProcessedPdfDocument:
     visual_ocr_pages_executed: tuple[int, ...] = ()
     visual_render_page_count: int = 0
     visual_rendered_page_hashes: tuple[str, ...] = ()
+
+    # Secuencia documental completa y ordenada.
+    reading_order: tuple[PdfReadingEntry, ...] = ()
+    ordered_text: str = ""
 
     extraction_method: str = "native_pdf"
     warnings: tuple[str, ...] = ()
@@ -434,6 +471,8 @@ class ProcessedPdfDocument:
             "visual_ocr_pages_executed": list(self.visual_ocr_pages_executed),
             "visual_render_page_count": self.visual_render_page_count,
             "visual_rendered_page_hashes": list(self.visual_rendered_page_hashes),
+            "reading_order": [entry.to_dict() for entry in self.reading_order],
+            "ordered_text": self.ordered_text,
             "extraction_method": self.extraction_method,
             "warnings": list(self.warnings),
             "errors": list(self.errors),

@@ -116,6 +116,11 @@ class DocumentKnowledgeBuilder:
                 )
             )
 
+        regions = self._order_regions(
+            regions=regions,
+            reading_order=document.reading_order,
+        )
+
         page_coverage = (
             sum(
                 1
@@ -198,6 +203,10 @@ class DocumentKnowledgeBuilder:
                 "source_visual_text_length": (
                     len(document.visual_text)
                 ),
+                "source_reading_order_count": len(document.reading_order),
+                "source_ordered_text_length": len(document.ordered_text),
+                "source_unordered_text": document.full_text,
+                "reading_contract_version": "1.0-spatial-preserved",
                 "region_count": len(regions),
                 "evidence_count": len(evidence),
                 "unresolved_count": len(unresolved),
@@ -210,7 +219,9 @@ class DocumentKnowledgeBuilder:
             content_type="application/pdf",
             page_count=document.page_count,
             regions=tuple(regions),
-            text=document.full_text,
+            # La comprensión recibe como texto principal la secuencia espacial
+            # ordenada; el texto nativo original queda preservado en metadata.
+            text=document.ordered_text or document.full_text,
             visual_text=document.visual_text,
             tables=tuple(
                 table.to_dict()
@@ -229,6 +240,11 @@ class DocumentKnowledgeBuilder:
                 for page in document.pages
                 for block in page.ocr_blocks
             ),
+            reading_order=tuple(
+                entry.to_dict()
+                for entry in document.reading_order
+            ),
+            ordered_text=document.ordered_text,
             sections=(),
             entities=(),
             attributes=(),
@@ -239,6 +255,46 @@ class DocumentKnowledgeBuilder:
             confidence=confidence,
             metadata=metadata,
         )
+
+    @staticmethod
+    def _order_regions(
+        *,
+        regions: list[DocumentRegion],
+        reading_order: tuple[Any, ...],
+    ) -> list[DocumentRegion]:
+        """Ordena regiones según la secuencia espacial sin descartar regiones auxiliares."""
+        source_rank: dict[str, int] = {}
+        for entry in reading_order:
+            source_id = str(getattr(entry, "source_id", "") or "")
+            if source_id:
+                source_rank[source_id] = int(getattr(entry, "sequence", 0) or 0)
+
+        def key(region: DocumentRegion) -> tuple[int, int, float, float, str]:
+            direct_rank = source_rank.get(region.metadata.get("block_id", ""), 0)
+            if not direct_rank:
+                direct_rank = source_rank.get(region.metadata.get("table_id", ""), 0)
+            if not direct_rank:
+                direct_rank = source_rank.get(region.metadata.get("image_id", ""), 0)
+            if not direct_rank and region.source_kind == "visual_understanding":
+                direct_rank = source_rank.get(
+                    f"page-{region.page_number}-visual",
+                    0,
+                )
+
+            if region.bbox is not None:
+                y, x = float(region.bbox[1]), float(region.bbox[0])
+            else:
+                y, x = float("inf"), float("inf")
+
+            return (
+                region.page_number,
+                direct_rank if direct_rank else 10**9,
+                y,
+                x,
+                region.region_id,
+            )
+
+        return sorted(regions, key=key)
 
     def _build_page_regions(
         self,

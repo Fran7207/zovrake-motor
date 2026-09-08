@@ -278,7 +278,8 @@ class OcrProcessor:
                 prepared.close()
 
         merged = self._merge_blocks(aggregate)
-        text = " ".join(
+        merged = self._sort_blocks_reading_order(merged)
+        text = "\n".join(
             block.text
             for block in merged
             if block.text.strip()
@@ -374,6 +375,23 @@ class OcrProcessor:
         buffer = BytesIO()
         image.save(buffer, format="PNG")
         return hashlib.sha256(buffer.getvalue()).hexdigest()
+
+    @staticmethod
+    def _sort_blocks_reading_order(
+        blocks: list[OcrTextBlock],
+    ) -> list[OcrTextBlock]:
+        """Ordena OCR por líneas y posición, sin perder bloques de ninguna pasada."""
+        if not blocks:
+            return []
+
+        def key(block: OcrTextBlock) -> tuple[float, float, str]:
+            if block.bbox is None:
+                return (float("inf"), float("inf"), block.text.casefold())
+            x0, y0, _, bottom = block.bbox
+            line_y = round((y0 + bottom) / 2.0, 1)
+            return (line_y, x0, block.text.casefold())
+
+        return sorted(blocks, key=key)
 
     @staticmethod
     def _normalize_text(value: str) -> str:

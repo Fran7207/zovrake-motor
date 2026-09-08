@@ -196,6 +196,8 @@ class DocumentKnowledge:
     images: tuple[dict[str, Any], ...] = ()
     structural_objects: tuple[dict[str, Any], ...] = ()
     ocr_blocks: tuple[dict[str, Any], ...] = ()
+    reading_order: tuple[dict[str, Any], ...] = ()
+    ordered_text: str = ""
 
     # Comprensión semántica.
     sections: tuple[dict[str, Any], ...] = ()
@@ -263,6 +265,8 @@ class DocumentKnowledge:
             "images": list(self.images),
             "structural_objects": list(self.structural_objects),
             "ocr_blocks": list(self.ocr_blocks),
+            "reading_order": list(self.reading_order),
+            "ordered_text": self.ordered_text,
             "sections": list(self.sections),
             "entities": [
                 entity.to_dict()
