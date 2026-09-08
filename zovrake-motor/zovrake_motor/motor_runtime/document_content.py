@@ -564,10 +564,17 @@ def resolve_evidence_documents(
                 f"{file_name}"
             )
 
+        document_knowledge = (
+            pdf_processing.get("document_knowledge")
+            if isinstance(pdf_processing, dict)
+            else None
+        )
+
         provider_resolution = _resolve_provider_identity(
             text=text,
             document_label=document_label,
             file_name=file_name,
+            knowledge=document_knowledge,
         )
 
         provider_name = str(
@@ -608,8 +615,15 @@ def resolve_evidence_documents(
             semantic_tables=semantic_tables,
         )
 
-        currency = _detect_currency(text)
-        total = _detect_total(text)
+        currency = _detect_currency(
+            text,
+            document_knowledge=document_knowledge,
+        )
+        total = _detect_total(
+            text,
+            document_knowledge=document_knowledge,
+            financial_information=financial_information,
+        )
         payment = _detect_payment_terms(text)
 
         comparative_projection = _build_comparative_projection(
@@ -1197,6 +1211,7 @@ def _resolve_provider_identity(
     text: str,
     document_label: str,
     file_name: str,
+    knowledge: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Resuelve la identidad del emisor/proveedor a partir de evidencia
@@ -1215,6 +1230,10 @@ def _resolve_provider_identity(
     los umbrales de resolución, ``resolved`` permanece en False y
     ``provider_name`` queda vacío.
     """
+    knowledge_resolution = _provider_resolution_from_knowledge(knowledge)
+    if knowledge_resolution.get("resolved"):
+        return knowledge_resolution
+
     if not text.strip():
         return {
             "provider_name": "",
@@ -1590,106 +1609,200 @@ def _resolve_provider_identity(
     }
 
 
-def _detect_currency(text: str) -> str:
-    """
-    Detecta la moneda documental dominante sin depender de la primera
-    coincidencia encontrada.
+def _provider_resolution_from_knowledge(
+    knowledge: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Usa la entidad proveedor ya resuelta por DocumentKnowledge."""
+    empty = {
+        "provider_name": "",
+        "provider_ruc": "",
+        "resolved": False,
+        "confidence": 0.0,
+        "candidates": [],
+        "evidence": [],
+    }
+    if not isinstance(knowledge, dict):
+        return empty
 
-    Se priorizan códigos explícitos y posteriormente símbolos monetarios.
-    Mantiene el contrato histórico ``str -> str``.
-    """
-    if not text:
-        return ""
+    entities = knowledge.get("entities", ()) or ()
+    providers = [
+        entity
+        for entity in entities
+        if isinstance(entity, dict)
+        and str(entity.get("role", "")).strip().casefold() == "provider"
+        and str(entity.get("name", "")).strip()
+    ]
+    if providers:
+        providers.sort(
+            key=lambda item: (
+                float(item.get("confidence", 0.0)),
+                bool(item.get("identifier")),
+            ),
+            reverse=True,
+        )
+        best = providers[0]
+        return {
+            "provider_name": str(best.get("name") or "").strip(),
+            "provider_ruc": str(best.get("identifier") or "").strip(),
+            "resolved": True,
+            "confidence": float(best.get("confidence", 0.0)),
+            "candidates": providers,
+            "evidence": list(
+                best.get("attributes", {}).get("resolution_evidence", ()) or ()
+            ),
+        }
 
-    code_map = {
-        "PEN": "PEN",
-        "USD": "USD",
-        "EUR": "EUR",
-        "GBP": "GBP",
-        "COP": "COP",
-        "MXN": "MXN",
-        "CLP": "CLP",
-        "ARS": "ARS",
-        "BOB": "BOB",
-        "BRL": "BRL",
-        "CAD": "CAD",
-        "AUD": "AUD",
-        "CHF": "CHF",
-        "JPY": "JPY",
-        "CNY": "CNY",
-        "INR": "INR",
+    candidates = (
+        knowledge.get("metadata", {}).get("entity_candidates", ())
+        or ()
+    )
+    resolved = [
+        candidate
+        for candidate in candidates
+        if isinstance(candidate, dict)
+        and str(candidate.get("role", "")).strip().casefold() == "provider"
+        and candidate.get("resolved")
+        and str(candidate.get("name", "")).strip()
+    ]
+    if not resolved:
+        return empty
+    resolved.sort(
+        key=lambda item: float(item.get("score", 0.0)),
+        reverse=True,
+    )
+    best = resolved[0]
+    return {
+        "provider_name": str(best.get("name") or "").strip(),
+        "provider_ruc": str(best.get("identifier") or "").strip(),
+        "resolved": True,
+        "confidence": min(1.0, float(best.get("score", 0.0)) / 55.0),
+        "candidates": resolved,
+        "evidence": list(best.get("evidence", ()) or ()),
     }
 
-    symbol_map = {
-        "S/": "PEN",
-        "S/.": "PEN",
-        "US$": "USD",
-        "U$S": "USD",
-        "$": "USD",
-        "€": "EUR",
-        "£": "GBP",
-        "¥": "JPY",
-        "BS": "BOB",
-        "BS.": "BOB",
-    }
 
+def _detect_currency(
+    text: str,
+    *,
+    document_knowledge: dict[str, Any] | None = None,
+) -> str:
+    """Detecta moneda usando primero evidencia semántica fuerte."""
     scores: dict[str, float] = {}
 
-    for pattern in _CURRENCY_PATTERNS:
-        for match in pattern.finditer(text):
-            groups = match.groupdict()
-            token = (
-                groups.get("code")
-                or groups.get("symbol")
+    if isinstance(document_knowledge, dict):
+        for fact in document_knowledge.get("facts", ()) or ():
+            if not isinstance(fact, dict):
+                continue
+            label = str(
+                fact.get("normalized_label")
+                or fact.get("label")
                 or ""
-            ).strip()
+            ).strip().casefold()
+            value = str(
+                fact.get("normalized_value")
+                or fact.get("raw_value")
+                or ""
+            ).strip().upper()
+            if label in {"currency", "moneda"} and value in {
+                "PEN", "USD", "EUR", "GBP", "COP", "MXN", "CLP",
+                "ARS", "BOB", "BRL", "CAD", "AUD", "CHF", "JPY",
+                "CNY", "INR",
+            }:
+                scores[value] = scores.get(value, 0.0) + 25.0
 
-            if not token:
+    lower = (text or "").casefold()
+    for phrase, currency in (
+        ("soles peruanos", "PEN"),
+        ("precios expresados en soles", "PEN"),
+        ("soles", "PEN"),
+        ("nuevo sol", "PEN"),
+        ("dólares", "USD"),
+        ("dolares", "USD"),
+        ("euros", "EUR"),
+        ("libras esterlinas", "GBP"),
+    ):
+        if phrase in lower:
+            scores[currency] = scores.get(currency, 0.0) + 18.0
+
+    # Tokens explícitos del documento, con menor peso que una frase semántica.
+    for match in _CURRENCY_PATTERNS[0].finditer(text or ""):
+        code = match.group("code").upper()
+        scores[code] = scores.get(code, 0.0) + 3.0
+    for match in _CURRENCY_PATTERNS[1].finditer(text or ""):
+        token = match.group("symbol").upper().replace(" ", "")
+        symbol_map = {
+            "S/": "PEN", "S/.": "PEN", "US$": "USD", "U$S": "USD",
+            "$": "USD", "€": "EUR", "£": "GBP", "¥": "JPY",
+            "BS": "BOB", "BS.": "BOB",
+        }
+        currency = symbol_map.get(token)
+        if currency:
+            scores[currency] = scores.get(currency, 0.0) + 2.0
+
+    return max(scores, key=scores.get) if scores else ""
+
+
+def _detect_total(
+    text: str,
+    *,
+    document_knowledge: dict[str, Any] | None = None,
+    financial_information: dict[str, Any] | None = None,
+) -> str:
+    """Obtiene el total documental exacto, priorizando tablas y hechos."""
+    if isinstance(document_knowledge, dict):
+        for table in document_knowledge.get("tables", ()) or ():
+            if not isinstance(table, dict):
                 continue
+            for row in table.get("rows", ()) or ():
+                if not isinstance(row, dict):
+                    continue
+                total_value = str(row.get("total", "") or "").strip()
+                if not _looks_like_price_value(total_value):
+                    continue
+                labels = [
+                    str(row.get(key, "") or "").strip().casefold()
+                    for key in (
+                        "description", "concept", "concepto", "label",
+                        "quantity", "item", "name",
+                    )
+                ]
+                if "total" in labels:
+                    return total_value
 
-            normalized = token.upper().replace(" ", "")
-            currency = code_map.get(normalized)
-
-            if currency is None:
-                currency = symbol_map.get(normalized)
-
-            if currency is None:
-                currency = symbol_map.get(token)
-
-            if currency is None:
+        for fact in document_knowledge.get("facts", ()) or ():
+            if not isinstance(fact, dict):
                 continue
+            label = str(
+                fact.get("normalized_label")
+                or fact.get("label")
+                or ""
+            ).strip().casefold()
+            source_kind = str(fact.get("source_kind") or "").strip().casefold()
+            raw_value = str(fact.get("raw_value") or "").strip()
+            if label == "total" and source_kind in {
+                "semantic_table", "pdf_table", "physical_table"
+            } and _looks_like_price_value(raw_value):
+                return raw_value
 
-            weight = 3.0 if groups.get("code") else 1.0
-            scores[currency] = scores.get(currency, 0.0) + weight
+    if isinstance(financial_information, dict):
+        for fact in financial_information.get("facts", {}).get("total", ()) or ():
+            if not isinstance(fact, dict):
+                continue
+            raw_value = str(fact.get("raw_value") or "").strip()
+            reference = str(fact.get("source_reference") or "")
+            if raw_value and _looks_like_price_value(raw_value) and "row:" in reference and "/column:total" in reference:
+                return raw_value
 
-    if not scores:
-        return ""
-
-    return max(scores, key=scores.get)
-
-
-def _detect_total(text: str) -> str:
-    """
-    Detecta el total principal de forma conservadora.
-
-    Prioriza expresiones inequívocas antes que la etiqueta genérica
-    ``total``. Mantiene el formato numérico encontrado.
-    """
-    if not text:
-        return ""
-
+    # Fallback textual conservador: solo un valor inmediatamente asociado a
+    # una etiqueta inequívoca. Se conserva el token completo, incluidos decimales.
     for pattern in _FINANCIAL_LABEL_PATTERNS["total"]:
-        match = pattern.search(text)
-
-        if not match:
-            continue
-
-        raw_value = match.group("value").strip()
-        number_match = _NUMBER_PATTERN.search(raw_value)
-
-        if number_match:
-            return number_match.group(0).strip()
-
+        for match in pattern.finditer(text or ""):
+            raw_value = match.group("value").strip()
+            number_match = re.search(r"[-+]?\d[\d.,]*", raw_value)
+            if number_match:
+                token = number_match.group(0).strip(".,")
+                if _looks_like_price_value(token):
+                    return token
     return ""
 
 
@@ -1857,9 +1970,27 @@ def _extract_financial_information(
                 if not match:
                     continue
 
+                raw_value = match.group("value").strip()
+
+                # Una línea OCR demasiado larga suele ser la concatenación de
+                # varias filas/columnas. No la promocionamos como un hecho
+                # financiero porque ya disponemos de tablas estructuradas.
+                contamination_markers = (
+                    "sub total", "subtotal", "igv", "iva", "total",
+                    "forma de pago", "condiciones", "cuenta bancaria",
+                    "validez", "tiempo de entrega",
+                )
+                marker_hits = sum(
+                    1
+                    for marker in contamination_markers
+                    if marker in raw_value.casefold()
+                )
+                if len(raw_value) > 120 or marker_hits >= 2:
+                    continue
+
                 append_fact(
                     fact_type=fact_type,
-                    raw_value=match.group("value"),
+                    raw_value=raw_value,
                     source_kind="text",
                     source_reference=f"line:{line_number}",
                 )
@@ -1888,6 +2019,41 @@ def _extract_financial_information(
         for row_index, row in enumerate(rows):
             if not isinstance(row, dict):
                 continue
+
+            # Las tablas físicas pueden expresar los totales como una fila:
+            # CANT.=TOTAL + S/.TOTAL=21,000.00. Esta evidencia es superior a
+            # una línea de texto OCR que concatena subtotal/IGV/total.
+            row_label = ""
+            for label_key in (
+                "description", "concept", "concepto", "label",
+                "quantity", "item", "name",
+            ):
+                candidate_label = str(row.get(label_key, "") or "").strip()
+                if candidate_label:
+                    row_label = candidate_label.casefold()
+                    break
+
+            row_total = str(row.get("total", "") or "").strip()
+            if row_total and _looks_like_price_value(row_total):
+                row_label_map = {
+                    "sub total": "subtotal",
+                    "subtotal": "subtotal",
+                    "igv": "tax",
+                    "iva": "tax",
+                    "total": "total",
+                }
+                normalized_row_label = re.sub(r"\s+", " ", row_label)
+                summary_type = row_label_map.get(normalized_row_label)
+                if summary_type:
+                    append_fact(
+                        fact_type=summary_type,
+                        raw_value=row_total,
+                        source_kind="semantic_table",
+                        source_reference=(
+                            f"{table_id}/page:{page_number}/"
+                            f"row:{row_index}/column:total"
+                        ),
+                    )
 
             for key, raw_value in row.items():
                 value = (
@@ -1927,12 +2093,17 @@ def _extract_financial_information(
                 }.get(normalized_key)
 
                 if fact_type:
-                    append_fact(
-                        fact_type=fact_type,
-                        raw_value=value,
-                        source_kind="semantic_table",
-                        source_reference=source_reference,
-                    )
+                    # Una columna financiera solo puede producir un hecho
+                    # financiero cuando su valor es monetariamente válido.
+                    # Esto evita promover filas de condiciones/banca cuyo OCR
+                    # cayó accidentalmente bajo encabezados como TOTAL o IGV.
+                    if _looks_like_price_value(value):
+                        append_fact(
+                            fact_type=fact_type,
+                            raw_value=value,
+                            source_kind="semantic_table",
+                            source_reference=source_reference,
+                        )
                 elif normalized_key in {"currency", "moneda"}:
                     currency = detect_currency(value)
 
@@ -1945,6 +2116,19 @@ def _extract_financial_information(
                                 "source_reference": source_reference,
                             }
                         )
+
+    # La mención explícita de una moneda mediante lenguaje natural es una
+    # señal fuerte y preferible a códigos OCR aislados.
+    lower_text = (text or "").casefold()
+    if "soles" in lower_text or "sol peruano" in lower_text or "nuevo sol" in lower_text:
+        currencies.append(
+            {
+                "currency": "PEN",
+                "raw_value": "soles",
+                "source_kind": "text_currency_phrase",
+                "source_reference": "document_text",
+            }
+        )
 
     # -------------------------------------------------------------
     # Dedupe determinista.
@@ -2102,7 +2286,17 @@ def _semantic_tables_to_items(
         # La proyección de partidas es una frontera semántica estricta:
         # una tabla de identidad, condiciones, banca o finanzas nunca se
         # convierte en items aunque comparta nombres de columnas.
-        if table_role != "commercial_items":
+        structural_commercial_schema = (
+            has_description
+            and has_quantity
+            and has_unit
+            and (has_unit_price or has_total)
+        )
+
+        if (
+            table_role != "commercial_items"
+            and not structural_commercial_schema
+        ):
             continue
 
         if not has_description:
@@ -2214,6 +2408,7 @@ def _semantic_tables_to_items(
                     "quantity": quantity,
                     "unit_price": unit_price,
                     "unit": unit,
+                    "total": total,
                     "fields": {
                         key: value
                         for key, value in fields.items()
@@ -2426,6 +2621,75 @@ def _items_to_tables(
     )
 
 
+def _build_exact_financial_summary(
+    *,
+    document_knowledge: dict[str, Any] | None,
+    financial_information: dict[str, Any],
+    semantic_tables: tuple[dict[str, Any], ...],
+) -> dict[str, Any]:
+    """Normaliza los importes financieros para consumo comparativo."""
+    summary: dict[str, Any] = {}
+
+    for table in semantic_tables:
+        if not isinstance(table, dict):
+            continue
+        table_id = str(table.get("table_id", ""))
+        page = table.get("source_page_number")
+        for row_index, row in enumerate(table.get("rows", ()) or ()):
+            if not isinstance(row, dict):
+                continue
+            raw_total = str(row.get("total", "") or "").strip()
+            if not raw_total or not _looks_like_price_value(raw_total):
+                continue
+            label = ""
+            for key in ("description", "concept", "concepto", "label", "quantity", "item", "name"):
+                value = str(row.get(key, "") or "").strip()
+                if value:
+                    label = value.casefold()
+                    break
+            normalized_label = re.sub(r"\s+", " ", label)
+            kind = {
+                "sub total": "subtotal",
+                "subtotal": "subtotal",
+                "igv": "tax",
+                "iva": "tax",
+                "total": "total",
+            }.get(normalized_label)
+            if kind:
+                summary[kind] = {
+                    "value": raw_total,
+                    "source_kind": "semantic_table",
+                    "source_reference": f"{table_id}/page:{page}/row:{row_index}/column:total",
+                }
+
+    for kind in ("subtotal", "tax", "total"):
+        if kind in summary:
+            continue
+        facts = (financial_information.get("facts", {}) or {}).get(kind, ())
+        for fact in facts or ():
+            if not isinstance(fact, dict):
+                continue
+            raw = str(fact.get("raw_value") or "").strip()
+            if raw and _looks_like_price_value(raw):
+                summary[kind] = {
+                    "value": raw,
+                    "source_kind": str(fact.get("source_kind") or ""),
+                    "source_reference": str(fact.get("source_reference") or ""),
+                }
+                break
+
+    currencies = financial_information.get("currencies", ()) or ()
+    for currency in currencies:
+        if not isinstance(currency, dict):
+            continue
+        code = str(currency.get("currency") or "").strip().upper()
+        if code in {"PEN", "USD", "EUR", "GBP", "COP", "MXN", "CLP", "ARS", "BOB", "BRL", "CAD", "AUD", "CHF", "JPY", "CNY", "INR"}:
+            summary["currency"] = code
+            break
+
+    return summary
+
+
 def _build_comparative_projection(
     *,
     document_id: str,
@@ -2488,11 +2752,17 @@ def _build_comparative_projection(
             "ruc": str(provider_resolution.get("provider_ruc", "")),
             "resolved": bool(provider_resolution.get("resolved", False)),
             "confidence": float(provider_resolution.get("confidence", 0.0)),
+            "evidence": list(provider_resolution.get("evidence", ()) or ()),
         },
         "commercial_items": item_snapshots,
         "commercial_item_count": len(item_snapshots),
         "semantic_table_roles": table_roles,
         "financial_information": dict(financial_information),
+        "financial_summary": _build_exact_financial_summary(
+            document_knowledge=None,
+            financial_information=financial_information,
+            semantic_tables=semantic_tables,
+        ),
         "source_semantic_table_count": len(semantic_tables),
         "source_information_preserved": True,
         "comparison_projection_only": True,

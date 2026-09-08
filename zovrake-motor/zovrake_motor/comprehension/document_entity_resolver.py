@@ -36,7 +36,7 @@ class DocumentEntityResolver:
     resueltas.
     """
 
-    MODEL_VERSION = "1.1-deterministic-evidence-entity"
+    MODEL_VERSION = "1.2-deterministic-multimodal-issuer-entity"
 
     _LEGAL_SUFFIX = re.compile(
         r"(?i)(?<![A-ZÁÉÍÓÚÜÑ])"
@@ -193,6 +193,14 @@ class DocumentEntityResolver:
         self._collect_text_candidates(
             lines=lines,
             role_context=role_context,
+            candidates=candidates,
+        )
+
+        # Tercera pasada: utiliza evidencia visual y de identidad de contacto
+        # que ya existe en DocumentKnowledge. No vuelve a abrir el PDF.
+        self._collect_visual_identity_candidates(
+            knowledge=knowledge,
+            text_lines=lines,
             candidates=candidates,
         )
 
@@ -844,6 +852,222 @@ class DocumentEntityResolver:
                         candidates=candidates,
                     )
 
+    def _collect_visual_identity_candidates(
+        self,
+        *,
+        knowledge: DocumentKnowledge,
+        text_lines: list[str],
+        candidates: dict[tuple[str, str], dict[str, Any]],
+    ) -> None:
+        """Vincula identidad comercial ubicada en OCR visual/encabezados."""
+        commercial_context = self._normalize(" ".join(text_lines[:24]))
+        commercial_terms = (
+            "cotizacion", "cotización", "factura", "proforma", "oferta",
+            "precio", "venta", "pedido", "orden de compra", "proveedor",
+            "cliente", "productos", "servicios",
+        )
+        if not any(term in commercial_context for term in commercial_terms):
+            return
+
+        header_text = "\n".join(text_lines[:24])
+        ruc_matches = list(self._RUC.finditer(header_text))
+        header_ruc = ruc_matches[0].group("value") if ruc_matches else ""
+
+        visual_candidates: list[tuple[str, str, float]] = []
+        images = getattr(knowledge, "images", ()) or ()
+        max_y = max(
+            [
+                float((image.get("bbox") or [0, 0, 0, 0])[3])
+                for image in images
+                if isinstance(image, dict) and image.get("bbox")
+            ]
+            or [0.0]
+        )
+        header_limit = max_y * 0.28 if max_y else 180.0
+
+        for image in images:
+            if not isinstance(image, dict):
+                continue
+            bbox = image.get("bbox") or ()
+            if len(bbox) < 4:
+                continue
+            try:
+                top_y = float(bbox[1])
+            except (TypeError, ValueError):
+                continue
+            if top_y > header_limit:
+                continue
+
+            visual_text = str(image.get("ocr_text") or "").strip()
+            if not visual_text:
+                visual_data = image.get("visual_understanding") or {}
+                visual_text = str(visual_data.get("detected_text") or "").strip()
+            visual_name = self._extract_brand_like_name(visual_text)
+            if visual_name:
+                visual_candidates.append((visual_name, str(image.get("image_id", "")), 12.0))
+
+        aggregated_visual = str(getattr(knowledge, "visual_text", "") or "").strip()
+        aggregated_name = self._extract_brand_like_name(aggregated_visual)
+        if aggregated_name:
+            visual_candidates.append((aggregated_name, "visual_text", 9.0))
+
+        for email in self._extract_emails("\n".join(text_lines)):
+            email_name = self._name_from_business_email(email)
+            if not email_name:
+                continue
+
+            best_name = email_name
+            source = "business_email_identity"
+            score = 14.0
+
+            for visual_name, source_id, visual_score in visual_candidates:
+                if self._identity_tokens_overlap(email_name, visual_name):
+                    best_name = self._merge_identity_names(email_name, visual_name)
+                    source = f"visual_header:{source_id}"
+                    score += visual_score + 8.0
+                    break
+
+            self._add_candidate(
+                role="provider",
+                name=best_name,
+                region=None,
+                source=source,
+                score=score,
+                candidates=candidates,
+                require_legal_entity=False,
+            )
+
+            state = candidates.get(("provider", self._entity_key(best_name)))
+            if state is None:
+                continue
+
+            if header_ruc:
+                state["identifier"] = header_ruc
+                state["score"] += 14.0
+                state["evidence"].append(f"header_first_ruc:{header_ruc}")
+                state["attributes"]["identity_cross_source"] = (
+                    "business_email_plus_visual_header_plus_header_ruc"
+                )
+
+            if visual_candidates:
+                state["score"] += 4.0
+                state["evidence"].append("visual_header_identity_support")
+
+    @staticmethod
+    def _extract_emails(text: str) -> tuple[str, ...]:
+        matches = re.findall(
+            r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b",
+            text or "",
+            flags=re.IGNORECASE,
+        )
+        return tuple(dict.fromkeys(matches))
+
+    @staticmethod
+    def _name_from_business_email(email: str) -> str:
+        local = email.split("@", 1)[0].casefold()
+        local = re.sub(r"[0-9]+$", "", local)
+        local = re.sub(r"[._-]+", " ", local).strip()
+        if not local:
+            return ""
+
+        prefixes = (
+            "corporacion", "corporación", "empresa", "grupo",
+            "comercial", "industrial", "inversiones", "constructora",
+            "servicios", "sociedad", "distribuciones", "importaciones",
+            "exportaciones", "ferreteria", "ferretería", "multiservicios",
+            "proyectos", "transportes", "logistica", "logística",
+        )
+        for prefix in prefixes:
+            if local.startswith(prefix) and len(local) > len(prefix) + 2:
+                remainder = local[len(prefix):].strip(" _-.")
+                if remainder:
+                    return f"{prefix} {remainder}".strip().upper()
+
+        parts = local.split()
+        if len(parts) >= 2:
+            return " ".join(parts).upper()
+        return ""
+
+    @staticmethod
+    def _extract_brand_like_name(text: str) -> str:
+        cleaned = " ".join(str(text or "").split())
+        if not cleaned:
+            return ""
+
+        tokens = re.findall(
+            r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]{2,}",
+            cleaned,
+        )
+        ignored = {
+            "ruc", "cotizacion", "cotización", "fecha", "empresa",
+            "cliente", "proveedor", "productos", "servicios",
+            "ladrillos", "cemento", "tuberias", "tuberías", "aa",
+            "aro", "y", "o",
+        }
+        useful = [token for token in tokens if token.casefold() not in ignored]
+        if not useful:
+            return ""
+
+        business_tokens = {
+            "corporacion", "corporación", "grupo", "empresa", "industrial",
+            "comercial", "inversiones", "constructora", "servicios",
+        }
+        for token in useful:
+            if token.casefold() in business_tokens:
+                other = next((item for item in useful if item is not token), "")
+                if other:
+                    return f"{token} {other}".upper()
+        if len(useful) >= 2:
+            return " ".join(useful[:2]).upper()
+        return useful[0].upper() if useful[0].isupper() else ""
+
+    @staticmethod
+    def _identity_tokens_overlap(left: str, right: str) -> bool:
+        a = {token for token in re.split(r"\W+", left.casefold()) if len(token) >= 3}
+        b = {token for token in re.split(r"\W+", right.casefold()) if len(token) >= 3}
+        if a.intersection(b):
+            return True
+        for token_a in a:
+            for token_b in b:
+                if len(token_a) >= 4 and len(token_b) >= 4:
+                    if token_a.startswith(token_b) or token_b.startswith(token_a):
+                        return True
+        return False
+
+    @staticmethod
+    def _merge_identity_names(left: str, right: str) -> str:
+        left_tokens = left.strip().upper().split()
+        right_tokens = right.strip().upper().split()
+        if not left_tokens:
+            return right.strip().upper()
+        if not right_tokens:
+            return left.strip().upper()
+
+        corporate_prefixes = {
+            "CORPORACION", "CORPORACIÓN", "EMPRESA", "GRUPO",
+            "COMERCIAL", "INDUSTRIAL", "INVERSIONES", "CONSTRUCTORA",
+            "SERVICIOS", "SOCIEDAD", "DISTRIBUCIONES", "IMPORTACIONES",
+            "EXPORTACIONES", "FERRETERIA", "FERRETERÍA", "MULTISERVICIOS",
+            "PROYECTOS", "TRANSPORTES", "LOGISTICA", "LOGÍSTICA",
+        }
+        if left_tokens[0] in corporate_prefixes:
+            right_core = next(
+                (token for token in right_tokens if token not in corporate_prefixes),
+                right_tokens[-1],
+            )
+            for left_core in left_tokens[1:]:
+                if (
+                    len(left_core) >= 4
+                    and len(right_core) >= 4
+                    and (left_core.startswith(right_core) or right_core.startswith(left_core))
+                ):
+                    return f"{left_tokens[0]} {right_core}"
+            return f"{left_tokens[0]} {right_core}"
+
+        if len(right_tokens) >= len(left_tokens):
+            return right.strip().upper()
+        return left.strip().upper()
+
     def _metadata_role(
         self,
         region: Any,
@@ -1002,6 +1226,7 @@ class DocumentEntityResolver:
             tuple[str, str],
             dict[str, Any],
         ],
+        require_legal_entity: bool = True,
     ) -> None:
         allowed_roles = {
             "provider",
@@ -1017,12 +1242,14 @@ class DocumentEntityResolver:
             name
         )
 
-        if role in {
-            "provider",
-            "customer",
-            "manufacturer",
-        } and not self._looks_like_legal_entity(
-            cleaned
+        if (
+            require_legal_entity
+            and role in {
+                "provider",
+                "customer",
+                "manufacturer",
+            }
+            and not self._looks_like_legal_entity(cleaned)
         ):
             return
 
