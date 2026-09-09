@@ -271,6 +271,9 @@ class DeepDocumentComprehensionEngine:
         document_understanding = universal_understanding.get("document_understanding", {})
         resolved_roles = universal_understanding.get("resolved_roles", [])
         multimodal_reasoning = universal_understanding.get("multimodal_reasoning", {})
+        semantic_dictionary = universal_understanding.get("semantic_dictionary", [])
+        entity_profiles = universal_understanding.get("entity_profiles", [])
+        semantic_graph = universal_understanding.get("semantic_graph", {})
 
         concepts = self._build_semantic_concepts(knowledge)
         line_model = self._build_reading_lines(knowledge)
@@ -315,6 +318,9 @@ class DeepDocumentComprehensionEngine:
                 "deep_universal_semantic_model_version": universal_understanding["model_version"],
                 "deep_document_understanding": document_understanding,
                 "deep_resolved_roles": resolved_roles,
+                "deep_semantic_dictionary": semantic_dictionary,
+                "deep_entity_profiles": entity_profiles,
+                "deep_semantic_graph": semantic_graph,
                 "deep_multimodal_reasoning": multimodal_reasoning,
                 "deep_semantic_concepts": concepts,
                 "deep_semantic_index": semantic_index,
@@ -333,7 +339,11 @@ class DeepDocumentComprehensionEngine:
                 "deep_cross_region_relationship_count": len(spatial_relations) + len(reference_relations),
                 "deep_comprehension_confidence": confidence,
                 "deep_comprehension_unresolved_count": len(unresolved),
-                "deep_reasoning_ready": bool(document_understanding.get("answer_ready")),
+                "deep_reasoning_ready": bool(document_understanding.get("answer_ready")) and not any(
+                    str(item.get("decision") or "") == "ambiguous"
+                    for item in resolved_roles
+                    if str(item.get("role") or "") in {"provider", "customer"}
+                ),
                 "deep_resolved_provider_count": sum(
                     1 for item in resolved_roles
                     if item.get("role") == "provider" and item.get("decision") == "resolved"

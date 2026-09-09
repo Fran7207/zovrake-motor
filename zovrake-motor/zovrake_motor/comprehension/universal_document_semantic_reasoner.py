@@ -9,6 +9,7 @@ import re
 from typing import Any, Iterable
 
 from zovrake_motor.comprehension.models import DocumentKnowledge
+from zovrake_motor.comprehension.document_semantic_lexicon import DocumentSemanticLexicon
 
 
 @dataclass(frozen=True)
@@ -38,7 +39,7 @@ class UniversalSemanticObservation:
 class UniversalDocumentSemanticReasoner:
     """Construye un grafo semántico conservador a partir de evidencia existente."""
 
-    MODEL_VERSION = "2.0-universal-evidence-graph"
+    MODEL_VERSION = "3.0-universal-evidence-graph-semantic-ontology"
 
     _LEGAL_ENTITY = re.compile(
         r"(?i)([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ0-9&.,'()\- ]{2,120}?"
@@ -103,6 +104,7 @@ class UniversalDocumentSemanticReasoner:
 
         observations = self._build_observations(knowledge)
         fields = self._build_fields(observations)
+        semantic_dictionary = self._build_semantic_dictionary(knowledge, observations)
         mentions = self._build_entity_mentions(observations)
         roles = self._build_role_candidates(observations, knowledge.entities, mentions)
         visuals = self._build_visuals(knowledge)
@@ -113,6 +115,20 @@ class UniversalDocumentSemanticReasoner:
         multimodal = self._build_multimodal_reasoning(knowledge, observations, mentions, fields, visuals, roles)
         resolved_roles = self._resolve_role_conclusions(roles, conflicts=self._build_conflicts(roles, fields))
         conflicts = self._build_conflicts(roles, fields)
+        entity_profiles = self._build_entity_profiles(
+            knowledge=knowledge,
+            mentions=mentions,
+            roles=roles,
+            resolved_roles=resolved_roles,
+            fields=fields,
+            visuals=visuals,
+        )
+        semantic_graph = self._build_semantic_graph(
+            entity_profiles=entity_profiles,
+            relations=relations,
+            multimodal=multimodal,
+            numeric=numeric,
+        )
         coverage = self._build_coverage(knowledge, observations, visuals)
         page_summary = self._build_page_summary(knowledge, observations)
         understanding = self._build_document_understanding(
@@ -134,11 +150,14 @@ class UniversalDocumentSemanticReasoner:
             "stage": "evidence_graph_reasoning",
             "document_id": knowledge.document_id,
             "document_kind": self._infer_document_kind(knowledge, fields),
+            "semantic_dictionary": semantic_dictionary,
             "observations": [item.to_dict() for item in observations],
             "semantic_fields": fields,
             "entity_mentions": mentions,
             "role_candidates": roles,
             "resolved_roles": resolved_roles,
+            "entity_profiles": entity_profiles,
+            "semantic_graph": semantic_graph,
             "visual_understanding": visuals,
             "relations": relations,
             "multimodal_reasoning": multimodal,
@@ -168,6 +187,9 @@ class UniversalDocumentSemanticReasoner:
                 ],
                 "entities": mentions,
                 "fields": fields,
+                "semantic_dictionary": semantic_dictionary,
+                "entity_profiles": entity_profiles,
+                "semantic_graph": semantic_graph,
                 "visual": visuals,
                 "resolved_roles": resolved_roles,
                 "multimodal_reasoning": multimodal,
@@ -222,6 +244,9 @@ class UniversalDocumentSemanticReasoner:
             raw_label = " ".join(match.group("label").split())
             value = " ".join(match.group("value").split())
             semantic_key = self._canonical_label(raw_label)
+            lexical_match = DocumentSemanticLexicon.match(raw_label)
+            if lexical_match and lexical_match.confidence >= 0.80:
+                semantic_key = lexical_match.semantic_key
             if not semantic_key:
                 continue
             result.append({
@@ -232,9 +257,85 @@ class UniversalDocumentSemanticReasoner:
                 "page_number": obs.page_number,
                 "source_id": obs.source_id,
                 "observation_id": obs.observation_id,
-                "confidence": obs.confidence,
+                "confidence": round(min(0.999, obs.confidence * (lexical_match.confidence if lexical_match else 1.0)), 4),
+                "meaning": self._semantic_meaning(semantic_key),
+                "lexical_match": (
+                    {
+                        "alias": lexical_match.matched_alias,
+                        "confidence": lexical_match.confidence,
+                    }
+                    if lexical_match
+                    else None
+                ),
             })
         return self._dedupe_dicts(result, ("semantic_key", "raw_label", "value", "page_number", "source_id"))
+
+    def _build_semantic_dictionary(
+        self,
+        knowledge: DocumentKnowledge,
+        observations: list[UniversalSemanticObservation],
+    ) -> list[dict[str, Any]]:
+        """Construye un inventario de significados observados, no solo de alias conocidos."""
+        terms: list[str] = []
+        for obs in observations:
+            match = self._LABEL_VALUE.match(obs.text)
+            if match:
+                terms.append(match.group("label"))
+            # También capturamos palabras suficientemente estables como
+            # títulos/encabezados, pero no pretendemos definir cada token del
+            # idioma como si tuviéramos un diccionario general.
+            if obs.source_type in {"table", "semantic_table"}:
+                for token in re.split(r"\|", obs.text):
+                    token = " ".join(token.split())
+                    if 2 <= len(token) <= 80:
+                        terms.append(token)
+        terms.extend(
+            field.get("raw_label", "")
+            for field in self._build_fields(observations)
+        )
+        unique = list(dict.fromkeys(t for t in terms if str(t).strip()))
+        return DocumentSemanticLexicon.explain(unique)
+
+    @staticmethod
+    def _semantic_meaning(semantic_key: str) -> str:
+        meanings = {
+            "provider": "entidad que suministra, vende, cotiza o emite el bien/servicio según la evidencia documental",
+            "customer": "entidad destinataria o compradora según la evidencia documental",
+            "manufacturer": "entidad que fabrica o produce el bien",
+            "product": "bien, artículo o producto identificado en el documento",
+            "description": "texto que describe o identifica el concepto/bien/servicio",
+            "quantity": "cantidad numérica asociada a un concepto",
+            "unit": "unidad, medida o presentación en la que se expresa una cantidad",
+            "price": "valor económico expresado como precio",
+            "unit_price": "valor económico por unidad de medida o presentación",
+            "amount": "importe monetario asociado a un concepto",
+            "total": "importe final o total declarado en el contexto correspondiente",
+            "subtotal": "importe intermedio antes de impuestos u otros ajustes",
+            "tax": "impuesto aplicado a una operación o importe",
+            "cost": "costo económico asociado a un concepto",
+            "currency": "moneda en la que se expresa un importe",
+            "payment_method": "medio o forma mediante la que se realiza el pago",
+            "payment_terms": "condiciones, plazos o reglas acordadas para el pago",
+            "delivery_time": "plazo o tiempo de entrega",
+            "delivery_location": "lugar al que se entrega el bien o servicio",
+            "warranty": "garantía ofrecida para el bien o servicio",
+            "validity": "periodo durante el cual la oferta o condición mantiene vigencia",
+            "tax_id": "identificador fiscal de una entidad o persona",
+            "email": "dirección de correo electrónico",
+            "phone": "número telefónico de contacto",
+            "address": "dirección o domicilio",
+            "date": "fecha documentada",
+            "reference": "referencia, proyecto, obra o identificador contextual",
+            "brand": "marca comercial asociada a un bien",
+            "model": "modelo o variante del bien",
+            "code": "código identificador del concepto",
+            "technical_specification": "característica o especificación técnica",
+            "certificate": "certificación o documento que acredita una condición",
+        }
+        return meanings.get(
+            semantic_key,
+            "concepto documental identificado a partir de evidencia y contexto; requiere validación contextual adicional",
+        )
 
     def _build_entity_mentions(self, observations: list[UniversalSemanticObservation]) -> list[dict[str, Any]]:
         result = []
@@ -302,8 +403,13 @@ class UniversalDocumentSemanticReasoner:
             if not role or not name:
                 continue
             state = get(role, name, str(getattr(entity, "identifier", "") or ""))
-            state["score"] += 60.0 * self._confidence(getattr(entity, "confidence", 0.0))
-            state["evidence"].append("resolved_entity")
+            entity_confidence = self._confidence(getattr(entity, "confidence", 0.0))
+            state["score"] += 60.0 * entity_confidence
+            if getattr(entity, "identifier", ""):
+                state["score"] += 8.0
+                state["evidence"].append("resolved_entity_with_identifier")
+            else:
+                state["evidence"].append("resolved_entity")
             state["source_ids"].extend(getattr(entity, "evidence_ids", ()) or ())
         ranked = list(states.values())
         for state in ranked:
@@ -333,6 +439,139 @@ class UniversalDocumentSemanticReasoner:
                 "analysis_status": str(visual.get("analysis_status") or "unknown"),
             })
         return result
+
+    def _build_entity_profiles(self, *, knowledge, mentions, roles, resolved_roles, fields, visuals):
+        """Consolida toda la evidencia conocida sobre cada entidad."""
+        profiles: dict[str, dict[str, Any]] = {}
+
+        def profile(name: str, identifier: str = "") -> dict[str, Any]:
+            key = self._normalize(identifier or name)
+            return profiles.setdefault(key, {
+                "profile_id": f"entity-profile:{self._digest(key)}",
+                "name": name,
+                "normalized_name": self._normalize(name),
+                "identifiers": [],
+                "roles": [],
+                "resolved_roles": {},
+                "fields": [],
+                "visual_evidence": [],
+                "source_ids": [],
+                "evidence_count": 0,
+                "confidence": 0.0,
+            })
+
+        for mention in mentions:
+            p = profile(mention.get("name", ""), mention.get("identifier", ""))
+            identifier = str(mention.get("identifier") or "").strip()
+            if identifier and identifier not in p["identifiers"]:
+                p["identifiers"].append(identifier)
+            p["source_ids"].append(mention.get("source_id"))
+            p["evidence_count"] += 1
+            p["confidence"] = max(p["confidence"], float(mention.get("confidence", 0.0) or 0.0))
+
+        for candidate in roles:
+            p = profile(candidate.get("name", ""), candidate.get("identifier", ""))
+            role = str(candidate.get("role") or "unknown")
+            if role not in p["roles"]:
+                p["roles"].append(role)
+            p["source_ids"].extend(candidate.get("source_ids", ()) or ())
+            p["evidence_count"] += len(candidate.get("evidence", ()) or ())
+            p["confidence"] = max(p["confidence"], float(candidate.get("confidence", 0.0) or 0.0))
+
+        for decision in resolved_roles:
+            p = profile(decision.get("name", ""), decision.get("identifier", ""))
+            p["resolved_roles"][str(decision.get("role") or "unknown")] = {
+                "decision": decision.get("decision"),
+                "confidence": decision.get("confidence", 0.0),
+                "margin": decision.get("decision_margin", 0.0),
+                "evidence": list(decision.get("evidence", ()) or ()),
+            }
+
+        mentions_by_name = {
+            self._normalize(m.get("name", "")): m
+            for m in mentions
+            if m.get("name")
+        }
+        for field in fields:
+            value_norm = self._normalize(field.get("value", ""))
+            if not value_norm:
+                continue
+            for name_norm, mention in mentions_by_name.items():
+                if name_norm in value_norm or value_norm in name_norm:
+                    p = profile(mention.get("name", ""), mention.get("identifier", ""))
+                    p["fields"].append({
+                        "semantic_key": field.get("semantic_key"),
+                        "raw_label": field.get("raw_label"),
+                        "value": field.get("value"),
+                        "source_id": field.get("source_id"),
+                    })
+
+        for visual in visuals:
+            visual_norm = self._normalize(
+                " ".join([
+                    visual.get("detected_text", ""),
+                    visual.get("description", ""),
+                    " ".join(visual.get("semantic_hints", ())),
+                ])
+            )
+            if not visual_norm:
+                continue
+            for mention in mentions:
+                name_norm = mention.get("normalized_name", "")
+                if name_norm and name_norm in visual_norm:
+                    p = profile(mention.get("name", ""), mention.get("identifier", ""))
+                    p["visual_evidence"].append({
+                        "image_id": visual.get("image_id"),
+                        "image_type": visual.get("image_type"),
+                        "detected_text": visual.get("detected_text", ""),
+                        "confidence": visual.get("confidence", 0.0),
+                    })
+
+        result = []
+        for p in profiles.values():
+            p["source_ids"] = list(dict.fromkeys(x for x in p["source_ids"] if x))
+            p["roles"] = list(dict.fromkeys(p["roles"]))
+            p["fields"] = self._dedupe_dicts(p["fields"], ("semantic_key", "raw_label", "value", "source_id"))
+            p["confidence"] = round(min(0.999, p["confidence"]), 4)
+            p["semantic_summary"] = {
+                "role_count": len(p["roles"]),
+                "resolved_role_count": sum(1 for item in p["resolved_roles"].values() if item.get("decision") == "resolved"),
+                "field_count": len(p["fields"]),
+                "visual_evidence_count": len(p["visual_evidence"]),
+            }
+            result.append(p)
+        result.sort(key=lambda item: (-item["confidence"], -item["evidence_count"], item["normalized_name"]))
+        return result
+
+    @staticmethod
+    def _build_semantic_graph(*, entity_profiles, relations, multimodal, numeric):
+        nodes = [
+            {
+                "node_id": p["profile_id"],
+                "node_type": "entity",
+                "label": p["name"],
+                "roles": list(p.get("roles", ())),
+                "confidence": p.get("confidence", 0.0),
+            }
+            for p in entity_profiles
+        ]
+        edges = []
+        for relation in list(relations) + list(multimodal.get("evidence_links", ()) or ()):
+            edges.append({
+                "source_id": relation.get("source_id"),
+                "target_id": relation.get("target_id"),
+                "relationship_type": relation.get("relationship_type"),
+                "confidence": relation.get("confidence", 0.0),
+                "evidence_ids": list(relation.get("evidence_ids", ()) or ()),
+            })
+        return {
+            "node_count": len(nodes),
+            "edge_count": len(edges),
+            "nodes": nodes,
+            "edges": edges,
+            "numeric_reasoning": numeric,
+            "reasoning_policy": "evidence_first_entity_field_relation_graph",
+        }
 
     def _build_relations(self, observations, mentions, roles):
         relations = []
