@@ -10,6 +10,7 @@ from typing import Any, Iterable
 
 from zovrake_motor.comprehension.models import DocumentKnowledge
 from zovrake_motor.comprehension.document_semantic_lexicon import DocumentSemanticLexicon
+from zovrake_motor.comprehension.semantic_closure import UniversalSemanticClosure
 
 
 @dataclass(frozen=True)
@@ -39,7 +40,7 @@ class UniversalSemanticObservation:
 class UniversalDocumentSemanticReasoner:
     """Construye un grafo semántico conservador a partir de evidencia existente."""
 
-    MODEL_VERSION = "3.0-universal-evidence-graph-semantic-ontology"
+    MODEL_VERSION = "3.1-universal-evidence-graph-semantic-closure"
 
     _LEGAL_ENTITY = re.compile(
         r"(?i)([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ0-9&.,'()\- ]{2,120}?"
@@ -105,6 +106,9 @@ class UniversalDocumentSemanticReasoner:
         observations = self._build_observations(knowledge)
         fields = self._build_fields(observations)
         semantic_dictionary = self._build_semantic_dictionary(knowledge, observations)
+        semantic_closure = UniversalSemanticClosure.build_dictionary(
+            [item.to_dict() for item in observations]
+        )
         mentions = self._build_entity_mentions(observations)
         roles = self._build_role_candidates(observations, knowledge.entities, mentions)
         visuals = self._build_visuals(knowledge)
@@ -151,6 +155,7 @@ class UniversalDocumentSemanticReasoner:
             "document_id": knowledge.document_id,
             "document_kind": self._infer_document_kind(knowledge, fields),
             "semantic_dictionary": semantic_dictionary,
+            "semantic_closure": semantic_closure,
             "observations": [item.to_dict() for item in observations],
             "semantic_fields": fields,
             "entity_mentions": mentions,
@@ -188,6 +193,7 @@ class UniversalDocumentSemanticReasoner:
                 "entities": mentions,
                 "fields": fields,
                 "semantic_dictionary": semantic_dictionary,
+                "semantic_closure": semantic_closure,
                 "entity_profiles": entity_profiles,
                 "semantic_graph": semantic_graph,
                 "visual": visuals,
@@ -411,6 +417,20 @@ class UniversalDocumentSemanticReasoner:
             else:
                 state["evidence"].append("resolved_entity")
             state["source_ids"].extend(getattr(entity, "evidence_ids", ()) or ())
+        # Evidencia de alto nivel ya resuelta por la capa de entidades.
+        # El razonador semántico no reemplaza esa evidencia: la incorpora y
+        # permite que el rol se mantenga estable aunque el texto OCR esté
+        # aplanado o contenga frases comerciales ambiguas.
+        for entity in entities:
+            role = str(getattr(entity, "role", "") or "").strip().lower()
+            name = str(getattr(entity, "name", "") or "").strip()
+            identifier = str(getattr(entity, "identifier", "") or "")
+            if not role or not name:
+                continue
+            state = get(role, name, identifier)
+            state["score"] += 24.0
+            state["evidence"].append("upstream_entity_resolution")
+
         ranked = list(states.values())
         for state in ranked:
             state["score"] = round(min(100.0, float(state["score"])), 3)
@@ -437,6 +457,9 @@ class UniversalDocumentSemanticReasoner:
                 "qr_codes": list(visual.get("qr_codes") or ()),
                 "confidence": UniversalDocumentSemanticReasoner._confidence(visual.get("visual_confidence")),
                 "analysis_status": str(visual.get("analysis_status") or "unknown"),
+                "ocr_confidence": UniversalDocumentSemanticReasoner._confidence(image.get("ocr_confidence")),
+                "content_sha256": str(image.get("content_sha256") or ""),
+                "source": str(image.get("image_id") or "pdf_image"),
             })
         return result
 
@@ -630,6 +653,35 @@ class UniversalDocumentSemanticReasoner:
                     "relationship_type": "visual_supports_entity_identity",
                     "confidence": round(confidence, 4),
                     "evidence": ["visual_text_token_overlap"],
+                })
+
+        for visual in visuals:
+            if not visual.get("page_number"):
+                continue
+            image_bbox = visual.get("bbox")
+            for mention in mentions:
+                if mention.get("page_number") != visual.get("page_number"):
+                    continue
+                visual_tokens = set(self._normalize(
+                    " ".join([
+                        visual.get("detected_text", ""),
+                        visual.get("description", ""),
+                    ])
+                ).split())
+                mention_tokens = set(self._normalize(mention.get("name", "")).split())
+                if not visual_tokens or not mention_tokens:
+                    continue
+                overlap = len(visual_tokens & mention_tokens)
+                proximity_score = 0.58 + min(0.18, overlap * 0.06)
+                if image_bbox is None:
+                    proximity_score -= 0.05
+                visual_entity_links.append({
+                    "relationship_id": f"visual-page:{self._digest(visual['image_id'] + mention['mention_id'])}",
+                    "image_id": visual["image_id"],
+                    "mention_id": mention["mention_id"],
+                    "relationship_type": "same_page_visual_context",
+                    "confidence": round(max(0.0, min(0.90, proximity_score)), 4),
+                    "evidence": ["same_page_context", "spatial_or_document_context"],
                 })
 
         for field in fields:

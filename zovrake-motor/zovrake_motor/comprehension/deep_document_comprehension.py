@@ -319,6 +319,7 @@ class DeepDocumentComprehensionEngine:
                 "deep_document_understanding": document_understanding,
                 "deep_resolved_roles": resolved_roles,
                 "deep_semantic_dictionary": semantic_dictionary,
+                "deep_semantic_closure": universal_understanding.get("semantic_closure", []),
                 "deep_entity_profiles": entity_profiles,
                 "deep_semantic_graph": semantic_graph,
                 "deep_multimodal_reasoning": multimodal_reasoning,

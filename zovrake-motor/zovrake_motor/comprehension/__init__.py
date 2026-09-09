@@ -55,6 +55,7 @@ from zovrake_motor.comprehension.context_integration import (
     RequirementContextModel,
 )
 from zovrake_motor.comprehension.integration import ComprehensionMotorIntegration
+from zovrake_motor.comprehension.semantic_closure import SemanticTerm, UniversalSemanticClosure
 from zovrake_motor.comprehension.models import (
     ComponentDescriptor,
     ComprehensionRequest,
@@ -96,6 +97,8 @@ __all__ = [
     "ComprehensionRequest",
     "ComprehensionResult",
     "ComprehensionService",
+    "SemanticTerm",
+    "UniversalSemanticClosure",
     "ComponentRegistry",
     "ContentExtractionEngine",
     "ContextAssociation",
