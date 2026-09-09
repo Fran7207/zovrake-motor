@@ -38,7 +38,7 @@ class UniversalSemanticObservation:
 class UniversalDocumentSemanticReasoner:
     """Construye un grafo semántico conservador a partir de evidencia existente."""
 
-    MODEL_VERSION = "1.0-universal-evidence-graph"
+    MODEL_VERSION = "2.0-universal-evidence-graph"
 
     _LEGAL_ENTITY = re.compile(
         r"(?i)([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ0-9&.,'()\- ]{2,120}?"
@@ -110,8 +110,23 @@ class UniversalDocumentSemanticReasoner:
         typed = self._build_typed_values(observations, fields)
         numeric = self._build_numeric_reasoning(knowledge)
         conflicts = self._build_conflicts(roles, fields)
+        multimodal = self._build_multimodal_reasoning(knowledge, observations, mentions, fields, visuals, roles)
+        resolved_roles = self._resolve_role_conclusions(roles, conflicts=self._build_conflicts(roles, fields))
+        conflicts = self._build_conflicts(roles, fields)
         coverage = self._build_coverage(knowledge, observations, visuals)
         page_summary = self._build_page_summary(knowledge, observations)
+        understanding = self._build_document_understanding(
+            knowledge=knowledge,
+            mentions=mentions,
+            fields=fields,
+            roles=roles,
+            resolved_roles=resolved_roles,
+            visuals=visuals,
+            relations=relations,
+            multimodal=multimodal,
+            numeric=numeric,
+            conflicts=conflicts,
+        )
 
         return {
             "model_version": self.MODEL_VERSION,
@@ -123,8 +138,11 @@ class UniversalDocumentSemanticReasoner:
             "semantic_fields": fields,
             "entity_mentions": mentions,
             "role_candidates": roles,
+            "resolved_roles": resolved_roles,
             "visual_understanding": visuals,
             "relations": relations,
+            "multimodal_reasoning": multimodal,
+            "document_understanding": understanding,
             "typed_values": typed,
             "numeric_reasoning": numeric,
             "conflicts": conflicts,
@@ -151,6 +169,9 @@ class UniversalDocumentSemanticReasoner:
                 "entities": mentions,
                 "fields": fields,
                 "visual": visuals,
+                "resolved_roles": resolved_roles,
+                "multimodal_reasoning": multimodal,
+                "document_understanding": understanding,
             },
         }
 
@@ -219,7 +240,7 @@ class UniversalDocumentSemanticReasoner:
         result = []
         for obs in observations:
             for match in self._LEGAL_ENTITY.finditer(obs.text):
-                name = self._clean_entity_name(match.group(1))
+                name = self._extract_legal_entity_name(match.group(1))
                 local = obs.text[max(0, match.start() - 90):match.end() + 120]
                 ruc = self._extract_ruc(local)
                 result.append({
@@ -250,7 +271,29 @@ class UniversalDocumentSemanticReasoner:
                 hits = [m for m in markers if self._normalize(m) in context]
                 if hits:
                     state = get(role, mention["name"], mention.get("identifier", ""))
-                    state["score"] += min(58.0, 18.0 + 8.0 * len(hits))
+                    weights = {
+                        "proveedor": 92.0, "proveedora": 92.0,
+                        "supplier": 92.0, "vendor": 88.0, "seller": 84.0,
+                        "emisor": 94.0, "emitter": 94.0,
+                        "vendedor": 84.0, "cotizado por": 96.0,
+                        "cotiza por": 94.0, "titular": 86.0,
+                        "depositar a nombre": 98.0, "cuentas bancarias": 94.0,
+                        "cuentas a nombre": 98.0, "atentamente": 78.0,
+                        "quedamos de ustedes": 78.0, "nuestra empresa": 82.0,
+                        "cliente": 92.0, "comprador": 92.0, "buyer": 92.0,
+                        "customer": 92.0, "destinatario": 92.0,
+                        "señor": 88.0, "señores": 94.0,
+                        "cotizado a": 96.0, "facturar a": 94.0,
+                        "datos del cliente": 98.0,
+                    }
+                    weights = {
+                        self._normalize(key): value
+                        for key, value in weights.items()
+                    }
+                    state["score"] += min(
+                        100.0,
+                        sum(weights.get(self._normalize(item), 16.0) for item in hits),
+                    )
                     state["evidence"].extend(f"marker:{item}" for item in hits)
                     state["source_ids"].append(mention["source_id"])
         for entity in entities:
@@ -306,6 +349,186 @@ class UniversalDocumentSemanticReasoner:
                     "evidence_ids": [mention["source_id"]],
                 })
         return self._dedupe_dicts(relations, ("source_id", "relationship_type", "target_id"))
+
+    def _build_multimodal_reasoning(self, knowledge, observations, mentions, fields, visuals, roles):
+        """Cruza texto, tablas, geometría y visión sin inventar objetos."""
+        links = []
+        visual_entity_links = []
+        field_entity_links = []
+        page_by_source = {obs.source_id: obs.page_number for obs in observations}
+
+        for visual in visuals:
+            visual_text = self._normalize(
+                " ".join(
+                    [
+                        visual.get("detected_text", ""),
+                        visual.get("description", ""),
+                        " ".join(visual.get("semantic_hints", ())),
+                    ]
+                )
+            )
+            if not visual_text:
+                continue
+            visual_tokens = {token for token in visual_text.split() if len(token) >= 3}
+            for mention in mentions:
+                mention_tokens = {
+                    token for token in self._normalize(mention.get("name", "")).split()
+                    if len(token) >= 3
+                }
+                overlap = len(visual_tokens & mention_tokens)
+                if overlap == 0:
+                    continue
+                confidence = min(
+                    0.98,
+                    0.55
+                    + 0.10 * overlap
+                    + 0.15 * float(visual.get("confidence", 0.0) or 0.0),
+                )
+                visual_entity_links.append({
+                    "relationship_id": f"visual-entity:{self._digest(visual['image_id'] + mention['mention_id'])}",
+                    "image_id": visual["image_id"],
+                    "mention_id": mention["mention_id"],
+                    "relationship_type": "visual_supports_entity_identity",
+                    "confidence": round(confidence, 4),
+                    "evidence": ["visual_text_token_overlap"],
+                })
+
+        for field in fields:
+            value_norm = self._normalize(field.get("value", ""))
+            if not value_norm:
+                continue
+            for mention in mentions:
+                name_norm = mention.get("normalized_name", "")
+                if not name_norm:
+                    continue
+                if name_norm in value_norm or value_norm in name_norm:
+                    field_entity_links.append({
+                        "relationship_id": f"field-entity:{self._digest(field['field_id'] + mention['mention_id'])}",
+                        "field_id": field["field_id"],
+                        "mention_id": mention["mention_id"],
+                        "relationship_type": "field_belongs_to_entity",
+                        "confidence": round(min(field["confidence"], mention["confidence"]), 4),
+                    })
+
+        for mention in mentions:
+            for field in fields:
+                if field.get("semantic_key") != "tax_id":
+                    continue
+                ruc = self._extract_ruc(mention.get("context", ""))
+                if ruc and self._normalize_numeric(field.get("value")) == self._normalize_numeric(ruc):
+                    links.append({
+                        "relationship_id": f"tax:{self._digest(mention['mention_id'] + field['field_id'])}",
+                        "source_id": mention["mention_id"],
+                        "relationship_type": "entity_has_tax_id",
+                        "target_id": field["field_id"],
+                        "confidence": round(min(mention["confidence"], field["confidence"]), 4),
+                    })
+
+        links.extend(visual_entity_links)
+        links.extend(field_entity_links)
+        return {
+            "visual_entity_links": self._dedupe_dicts(
+                visual_entity_links,
+                ("image_id", "mention_id", "relationship_type"),
+            ),
+            "field_entity_links": self._dedupe_dicts(
+                field_entity_links,
+                ("field_id", "mention_id", "relationship_type"),
+            ),
+            "evidence_links": self._dedupe_dicts(
+                links,
+                ("relationship_id",),
+            ),
+            "multimodal_link_count": len(links),
+        }
+
+    @staticmethod
+    def _resolve_role_conclusions(roles, conflicts=None):
+        conflicts = conflicts or []
+        by_role = defaultdict(list)
+        for role in roles:
+            by_role[str(role.get("role") or "unknown")].append(role)
+        conclusions = []
+        for role_name, candidates in by_role.items():
+            candidates = sorted(
+                candidates,
+                key=lambda item: (float(item.get("confidence", 0.0)), float(item.get("score", 0.0))),
+                reverse=True,
+            )
+            if not candidates:
+                continue
+            top = candidates[0]
+            second = candidates[1] if len(candidates) > 1 else None
+            margin = float(top.get("confidence", 0.0)) - float(second.get("confidence", 0.0)) if second else float(top.get("confidence", 0.0))
+            conflict = any(
+                str(conflict_item.get("name", "")).casefold() == str(top.get("name", "")).casefold()
+                for conflict_item in conflicts
+            )
+            conclusions.append({
+                "role": role_name,
+                "name": top.get("name", ""),
+                "identifier": top.get("identifier", ""),
+                "candidate_id": top.get("candidate_id", ""),
+                "confidence": round(float(top.get("confidence", 0.0)), 4),
+                "decision_margin": round(margin, 4),
+                "decision": (
+                    "resolved"
+                    if (
+                        float(top.get("confidence", 0.0)) >= 0.80
+                        and not conflict
+                        and (
+                            margin >= 0.08
+                            or any("marker:señores" == item for item in top.get("evidence", ()))
+                            or any("marker:proveedor" == item for item in top.get("evidence", ()))
+                            or any("marker:emisor" == item for item in top.get("evidence", ()))
+                            or any("marker:cuentas bancarias" == item for item in top.get("evidence", ()))
+                        )
+                    )
+                    else "ambiguous"
+                ),
+                "competing_candidates": [
+                    {
+                        "name": item.get("name", ""),
+                        "identifier": item.get("identifier", ""),
+                        "confidence": item.get("confidence", 0.0),
+                    }
+                    for item in candidates[1:5]
+                ],
+            })
+        return conclusions
+
+    def _build_document_understanding(
+        self,
+        *,
+        knowledge,
+        mentions,
+        fields,
+        roles,
+        resolved_roles,
+        visuals,
+        relations,
+        multimodal,
+        numeric,
+        conflicts,
+    ):
+        role_map = {
+            item["role"]: item
+            for item in resolved_roles
+            if item.get("decision") == "resolved"
+        }
+        return {
+            "document_id": knowledge.document_id,
+            "document_kind": self._infer_document_kind(knowledge, fields),
+            "entities": mentions,
+            "resolved_roles": role_map,
+            "semantic_fields": fields,
+            "visual_entities": visuals,
+            "relations": relations + multimodal.get("evidence_links", []),
+            "numeric_reasoning": numeric,
+            "conflicts": conflicts,
+            "answer_ready": bool(mentions or fields or visuals or knowledge.text.strip()),
+            "reasoning_policy": "evidence_first_conservative_resolution",
+        }
 
     def _build_typed_values(self, observations, fields):
         result = []
@@ -436,6 +659,40 @@ class UniversalDocumentSemanticReasoner:
     @staticmethod
     def _clean_entity_name(value: str) -> str:
         return " ".join(str(value).strip(" :,-\t").split())
+
+    @classmethod
+    def _extract_legal_entity_name(cls, value: str) -> str:
+        """Extrae la razón social sin etiquetas OCR como 'Señores' o 'Cuentas bancarias'."""
+        clean = cls._clean_entity_name(value)
+        match = re.search(
+            r"(?i)(?:S\.?\s*A\.?\s*C?\.?|S\.?\s*R\.?\s*L\.?|"
+            r"E\.?\s*I\.?\s*R\.?\s*L\.?|S\.?\s*A\.?|"
+            r"LLC|INC\.?|LTD\.?|LIMITED|CORP\.?|CORPORATION|PLC|"
+            r"GMBH|SAC|SRL|EIRL|LTDA\.?|LIMITADA)\s*$",
+            clean,
+        )
+        if not match:
+            return clean
+        prefix = clean[:match.start()].strip(" :,-")
+        legal_suffix = match.group(0).strip()
+        tokens = re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9&'()./-]+", prefix)
+        noise = {
+            "señores", "señor", "sr", "sres", "proveedor", "emisor", "empresa",
+            "cuentas", "cuentas bancarias", "bancarias", "titular", "a", "nombre",
+            "razon", "social", "cliente", "comprador", "cotizado", "por", "de",
+            "datos", "del", "la", "los", "las",
+        }
+        while tokens and tokens[0].casefold() in noise:
+            tokens.pop(0)
+        # Si 'cuentas bancarias' quedó en medio, cortar desde ahí.
+        filtered = []
+        for token in tokens:
+            if token.casefold() in noise and filtered:
+                continue
+            filtered.append(token)
+        if not filtered:
+            return clean
+        return " ".join(filtered + [legal_suffix])
 
     @classmethod
     def _extract_ruc(cls, text: str) -> str:

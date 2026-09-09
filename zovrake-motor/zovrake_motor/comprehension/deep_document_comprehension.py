@@ -51,7 +51,7 @@ class DeepDocumentComprehensionEngine:
     de fabricar un hecho.
     """
 
-    MODEL_VERSION = "2.1-universal-evidence-reasoning"
+    MODEL_VERSION = "3.0-universal-multimodal-reasoning"
     SCHEMA_VERSION = "deep-comprehension-schema-v2"
 
     # ------------------------------------------------------------------
@@ -268,6 +268,9 @@ class DeepDocumentComprehensionEngine:
             raise TypeError("knowledge debe ser una instancia de DocumentKnowledge")
 
         universal_understanding = UniversalDocumentSemanticReasoner().analyze(knowledge)
+        document_understanding = universal_understanding.get("document_understanding", {})
+        resolved_roles = universal_understanding.get("resolved_roles", [])
+        multimodal_reasoning = universal_understanding.get("multimodal_reasoning", {})
 
         concepts = self._build_semantic_concepts(knowledge)
         line_model = self._build_reading_lines(knowledge)
@@ -310,6 +313,9 @@ class DeepDocumentComprehensionEngine:
                 "deep_comprehension_profile": document_profile,
                 "deep_universal_understanding": universal_understanding,
                 "deep_universal_semantic_model_version": universal_understanding["model_version"],
+                "deep_document_understanding": document_understanding,
+                "deep_resolved_roles": resolved_roles,
+                "deep_multimodal_reasoning": multimodal_reasoning,
                 "deep_semantic_concepts": concepts,
                 "deep_semantic_index": semantic_index,
                 "deep_typed_values": typed_values,
@@ -327,6 +333,11 @@ class DeepDocumentComprehensionEngine:
                 "deep_cross_region_relationship_count": len(spatial_relations) + len(reference_relations),
                 "deep_comprehension_confidence": confidence,
                 "deep_comprehension_unresolved_count": len(unresolved),
+                "deep_reasoning_ready": bool(document_understanding.get("answer_ready")),
+                "deep_resolved_provider_count": sum(
+                    1 for item in resolved_roles
+                    if item.get("role") == "provider" and item.get("decision") == "resolved"
+                ),
             }
         )
 
