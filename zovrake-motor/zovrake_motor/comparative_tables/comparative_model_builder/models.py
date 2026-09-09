@@ -67,6 +67,7 @@ class DefinitiveComparativeModel:
     source_data_preserved: bool = True
     domain_model_preserved: bool = True
     document_ids: tuple[str, ...] = ()
+    presentation_layout: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -91,6 +92,7 @@ class DefinitiveComparativeModel:
             "source_data_preserved": self.source_data_preserved,
             "domain_model_preserved": self.domain_model_preserved,
             "document_ids": list(self.document_ids),
+            "presentation_layout": self.presentation_layout,
         }
 
 

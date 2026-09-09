@@ -16,6 +16,7 @@ from zovrake_motor.comparative_tables.comparative_model_builder.governance impor
     PM6_DEFINITIVE_OUTPUT_CONTRACT_VERSION,
     PM7_INPUT_CONTRACT_PREPARED,
 )
+from zovrake_motor.comparative_tables.comparative_model_builder.layout_composer import compose_comparative_layout
 from zovrake_motor.comparative_tables.comparative_model_builder.models import (
     DefinitiveCommercialInformation,
     DefinitiveComparativeModel,
@@ -335,6 +336,40 @@ def build_definitive_model(
         )
     )
 
+    presentation_layout = compose_comparative_layout(
+        enriched_context={
+            **dict(enriched_table.inherited_context),
+            **dict(enriched_table.metadata),
+        },
+        structure={
+            "table_id": enriched_table.table_id,
+            "group_id": enriched_table.group_id,
+            "group_type": enriched_table.group_type,
+            "available_attributes": (
+                dict(structure.metadata_prepared.get("available_attributes", {}))
+                if structure is not None else {}
+            ),
+            "available_providers": (
+                list(structure.metadata_prepared.get("available_providers", []))
+                if structure is not None else []
+            ),
+            "commercial_information": group_commercial,
+            "technical_information": group_technical_fields,
+            "primary_item": (
+                structure.metadata_prepared.get("available_attributes", {}).get("primary_item", "")
+                if structure is not None else ""
+            ),
+            "evaluation_criteria": (
+                structure.metadata_prepared.get("evaluation_criteria", [])
+                if structure is not None else []
+            ),
+        },
+        columns=[column for column in columns],
+        rows=[row for row in rows],
+        providers=[provider for provider in providers],
+        document_ids=document_ids,
+    )
+
     metadata = {
         "definitive_model_id": definitive_model_id,
         "enrichment_id": enriched_table.enrichment_id,
@@ -388,6 +423,13 @@ def build_definitive_model(
             provider_semantic_knowledge
         ),
         "concept_source_map": concept_source_map,
+        "presentation_layout_version": presentation_layout.get("layout_version", ""),
+        "presentation_template_fixed": bool(presentation_layout.get("template_fixed", True)),
+        "payment_method_included_when_available": bool(
+            presentation_layout.get("mandatory_present_when_available", {}).get(
+                "payment_method_or_terms", False
+            )
+        ),
     }
 
     motor_refs = {
@@ -419,6 +461,7 @@ def build_definitive_model(
         source_data_preserved=True,
         domain_model_preserved=input_view.structure_catalog.domain_model_preserved,
         document_ids=document_ids,
+        presentation_layout=presentation_layout,
     )
 
 

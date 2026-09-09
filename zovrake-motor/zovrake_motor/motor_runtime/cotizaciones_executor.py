@@ -3053,6 +3053,7 @@ class CotizacionesAnalysisExecutor:
 
             body: list[dict[str, Any]] = []
             provider_identities: set[str] = set()
+            provider_payment_methods: dict[str, dict[str, Any]] = {}
             resolved_item_count = 0
 
             for row in rows:
@@ -3141,6 +3142,9 @@ class CotizacionesAnalysisExecutor:
                     )
 
                 source_document_name = ""
+                source_document_payment_terms = ""
+                source_document_currency = ""
+                source_document_total = None
                 if source_document_id:
                     source_document = source_documents_by_id.get(
                         source_document_id
@@ -3151,6 +3155,30 @@ class CotizacionesAnalysisExecutor:
                             or source_document.document_label
                             or source_document_id
                         )
+                        source_document_payment_terms = str(
+                            source_document.commercial_payment_terms or ""
+                        ).strip()
+                        source_document_currency = str(
+                            source_document.commercial_currency or ""
+                        ).strip()
+                        source_document_total = source_document.commercial_total_amount
+
+                provider_payment_key = provider_identity or str(row.get("provider_id", "")).strip()
+                if provider_payment_key:
+                    provider_payment_methods[provider_payment_key] = {
+                        "provider_id": str(row.get("provider_id", "")),
+                        "provider_name": provider_name,
+                        "payment_method": source_document_payment_terms,
+                        "payment_terms": source_document_payment_terms,
+                        "currency": source_document_currency,
+                        "document_total": source_document_total,
+                        "source_document_id": source_document_id,
+                        "source_document_name": source_document_name,
+                        "evidence": {
+                            "document_id": source_document_id,
+                            "field": "commercial_payment_terms",
+                        },
+                    }
 
                 body.append(
                     {
@@ -3194,6 +3222,65 @@ class CotizacionesAnalysisExecutor:
             else:
                 comparison_status = "incomplete_source_binding"
 
+            presentation_layout = model.get("presentation_layout", {})
+            if not isinstance(presentation_layout, dict):
+                presentation_layout = {}
+            else:
+                presentation_layout = copy.deepcopy(presentation_layout)
+
+            # El método/condiciones de pago se expone en el cuadro únicamente
+            # cuando existe evidencia del documento correspondiente. Nunca se
+            # fabrica un valor para un proveedor que no lo tenga.
+            payment_entries = [
+                dict(value)
+                for value in provider_payment_methods.values()
+                if isinstance(value, dict) and str(value.get("payment_method", "")).strip()
+            ]
+            payment_section_present = bool(payment_entries)
+            if payment_section_present:
+                sections = presentation_layout.get("sections", [])
+                if isinstance(sections, list):
+                    payment_section = next(
+                        (
+                            section for section in sections
+                            if isinstance(section, dict)
+                            and section.get("section_id") == "payment_terms"
+                        ),
+                        None,
+                    )
+                    payment_fields = []
+                    for entry in payment_entries:
+                        payment_fields.append({
+                            "field_id": f"payment:{entry.get('provider_id', '')}",
+                            "semantic_key": "payment_method",
+                            "display_name": "Método/Condiciones de Pago",
+                            "value": entry.get("payment_method", ""),
+                            "provider_id": entry.get("provider_id", ""),
+                            "provider_name": entry.get("provider_name", ""),
+                            "source": "document",
+                            "source_document_id": entry.get("source_document_id", ""),
+                            "required": True,
+                        })
+                    if payment_section is None:
+                        sections.append({
+                            "section_id": "payment_terms",
+                            "title": "Método y condiciones de pago",
+                            "hierarchy": "secondary",
+                            "priority": 21,
+                            "fields": payment_fields,
+                            "layout_role": "data_section",
+                        })
+                    else:
+                        payment_section["fields"] = payment_fields
+                    presentation_layout["sections"] = sorted(
+                        [section for section in sections if isinstance(section, dict)],
+                        key=lambda item: (int(item.get("priority", 999)), str(item.get("section_id", ""))),
+                    )
+
+            presentation_layout["payment_methods"] = payment_entries
+            presentation_layout["provider_count"] = provider_count
+            presentation_layout["item_row_count"] = len(body)
+
             matrix = {
                 "comparative_table_id": str(
                     model.get(
@@ -3221,6 +3308,8 @@ class CotizacionesAnalysisExecutor:
                 ),
                 "comparison_status": comparison_status,
                 "comparison_ready": comparison_ready,
+                "presentation_layout": presentation_layout,
+                "payment_methods": payment_entries,
                 "provider_count": provider_count,
                 "resolved_item_count": resolved_item_count,
                 "source_bindings_complete": source_bindings_complete,
@@ -3289,6 +3378,7 @@ class CotizacionesAnalysisExecutor:
                     "currency": doc.commercial_currency,
                     "total_amount": doc.commercial_total_amount,
                     "payment_terms": doc.commercial_payment_terms,
+                    "payment_method": doc.commercial_payment_terms,
                     "items": [dict(item) for item in doc.items],
                 }
                 for doc in documents

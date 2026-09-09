@@ -8,7 +8,7 @@ consumir el Prompt Maestro 7.
 from __future__ import annotations
 
 PM6_DEFINITIVE_OUTPUT_CONTRACT_NAME = "DefinitiveComparativeModelCatalog"
-PM6_DEFINITIVE_OUTPUT_CONTRACT_VERSION = "1.0"
+PM6_DEFINITIVE_OUTPUT_CONTRACT_VERSION = "2.0"
 PM7_INPUT_CONTRACT_PREPARED = True
 
 PM6_DEFINITIVE_CATALOG_REQUIRED_FIELDS: tuple[str, ...] = (

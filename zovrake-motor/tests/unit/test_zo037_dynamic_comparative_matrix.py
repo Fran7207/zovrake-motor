@@ -126,6 +126,11 @@ def _model(provider_rows):
         "technical_information": {},
         "traceability": {},
         "source_data_preserved": True,
+        "presentation_layout": {
+            "layout_version": "1.0-dynamic-semantic-composition",
+            "template_fixed": False,
+            "decision_area": {"owner": "MP7", "fixed_content": False},
+        },
     }
 
 
@@ -198,6 +203,13 @@ def test_matrix_is_ready_for_two_distinct_providers_and_binds_exact_items() -> N
         "BLS",
         "18",
     ]
+    assert len(matrix["payment_methods"]) == 2
+    assert {entry["provider_name"] for entry in matrix["payment_methods"]} == {
+        "Proveedor A", "Proveedor B",
+    }
+    assert all(entry["payment_method"] == "Contado" for entry in matrix["payment_methods"])
+    assert matrix["presentation_layout"]["template_fixed"] is False
+    assert matrix["presentation_layout"]["decision_area"]["owner"] == "MP7"
 
 
 def test_single_provider_group_is_pending_not_a_comparison() -> None:
