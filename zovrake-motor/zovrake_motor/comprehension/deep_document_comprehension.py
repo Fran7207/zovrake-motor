@@ -38,8 +38,8 @@ from zovrake_motor.comprehension.models import (
     DocumentKnowledge,
     DocumentRelationship,
 )
-from zovrake_motor.comprehension.universal_document_semantic_reasoner import (
-    UniversalDocumentSemanticReasoner,
+from zovrake_motor.comprehension.ai.orchestrator import (
+    OpenAIComprehensionOrchestrator,
 )
 
 
@@ -370,7 +370,7 @@ class DeepDocumentComprehensionEngine:
         # a ZOVRAKE. Si la compuerta determina que no hace falta, no se realiza
         # ninguna llamada.
         try:
-            enriched = HybridDocumentComprehensionOrchestrator().enhance(
+            enriched = OpenAIComprehensionOrchestrator().enhance(
                 enriched,
                 pdf_bytes=pdf_bytes,
             )

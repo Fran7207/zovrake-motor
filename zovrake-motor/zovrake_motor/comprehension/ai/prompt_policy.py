@@ -222,13 +222,30 @@ def build_user_prompt(
     selected_context: dict[str, Any],
     include_full_pdf: bool,
 ) -> str:
+    selected_context = selected_context or {}
+
+    prompt_selected_context = dict(selected_context)
+
+    selected_images = selected_context.get("selected_images", ()) or ()
+
+    prompt_selected_context["selected_images"] = [
+        {
+            "page_number": image.get("page_number"),
+            "sha256": image.get("sha256", ""),
+            "detail": image.get("detail", "low"),
+        }
+        for image in selected_images
+        if isinstance(image, dict)
+    ]
+
     payload = {
         "task": "universal_document_understanding",
         "route": route,
         "full_pdf_attached": include_full_pdf,
         "local_context": _compact_local_context(knowledge),
-        "selected_evidence": selected_context,
+        "selected_evidence": prompt_selected_context,
     }
+
     return (
         "Interpreta el documento suministrado y devuelve únicamente el JSON del esquema. "
         "El conocimiento se entregará a ZOVRAKE para validación y fusión. "
