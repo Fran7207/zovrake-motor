@@ -897,6 +897,7 @@ def _decode_document_content(
             # DocumentKnowledge ya construido y no vuelve a leer el PDF.
             document_knowledge = DeepDocumentComprehensionEngine().comprehend(
                 document_knowledge,
+                pdf_bytes=raw,
             )
 
             tables = tuple(

@@ -263,7 +263,12 @@ class DeepDocumentComprehensionEngine:
     _REGION_NEAR_DISTANCE = 18.0
     _MAX_SPATIAL_EDGES_PER_REGION = 8
 
-    def comprehend(self, knowledge: DocumentKnowledge) -> DocumentKnowledge:
+    def comprehend(
+        self,
+        knowledge: DocumentKnowledge,
+        *,
+        pdf_bytes: bytes | None = None,
+    ) -> DocumentKnowledge:
         if not isinstance(knowledge, DocumentKnowledge):
             raise TypeError("knowledge debe ser una instancia de DocumentKnowledge")
 
@@ -352,13 +357,36 @@ class DeepDocumentComprehensionEngine:
             }
         )
 
-        return replace(
+        enriched = replace(
             knowledge,
             relationships=tuple(relationships),
             unresolved=tuple(unresolved),
             confidence=confidence,
             metadata=metadata,
         )
+
+        # OpenAI actúa solamente como capa de resolución selectiva. El
+        # razonamiento local, la captura y la evidencia siguen perteneciendo
+        # a ZOVRAKE. Si la compuerta determina que no hace falta, no se realiza
+        # ninguna llamada.
+        try:
+            enriched = HybridDocumentComprehensionOrchestrator().enhance(
+                enriched,
+                pdf_bytes=pdf_bytes,
+            )
+        except Exception as exc:
+            # Una dependencia remota nunca debe convertir un documento válido
+            # en un fallo de comprensión. Se conserva toda la comprensión local.
+            fallback_metadata = dict(enriched.metadata)
+            fallback_metadata["openai_hybrid_understanding"] = {
+                "status": "failed",
+                "route": "local_fallback",
+                "error": str(exc),
+            }
+            fallback_metadata["deep_reasoning_source"] = "local_fallback"
+            enriched = replace(enriched, metadata=fallback_metadata)
+
+        return enriched
 
     # ==================================================================
     # 1. Conceptos semánticos

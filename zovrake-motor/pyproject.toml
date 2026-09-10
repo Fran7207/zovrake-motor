@@ -18,6 +18,7 @@ dependencies = [
     "pypdfium2>=4.30,<5",
     "opencv-python-headless>=4.10,<5",
     "numpy>=1.26,<3",
+    "openai>=3.9,<4",
 ]
 
 [project.optional-dependencies]
